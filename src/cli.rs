@@ -261,6 +261,17 @@ pub enum Command {
 
     /// Check system health and configuration.
     Doctor,
+
+    /// Stream agent lifecycle events (JSON).
+    Events {
+        /// Filter to specific agent IDs (comma-separated, or pass multiple times).
+        #[arg(long, short, value_delimiter = ',')]
+        filter: Vec<String>,
+
+        /// Include output events (can be noisy).
+        #[arg(long)]
+        output: bool,
+    },
 }
 
 #[cfg(test)]

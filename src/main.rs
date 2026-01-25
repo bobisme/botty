@@ -178,6 +178,11 @@ async fn run_client(
         return run_attach_command(socket_path, id, readonly, detach_key).await;
     }
 
+    // Events command needs direct socket access (long-lived connection)
+    if let Command::Events { filter, output } = command {
+        return run_events_command(socket_path, filter, output).await;
+    }
+
     let mut client = Client::new(socket_path);
 
     match command {
@@ -499,7 +504,7 @@ async fn run_client(
         }
 
         // These commands are handled before this match
-        Command::Attach { .. } | Command::Server { .. } | Command::Doctor => {
+        Command::Attach { .. } | Command::Server { .. } | Command::Doctor | Command::Events { .. } => {
             unreachable!("handled above")
         }
 
@@ -803,6 +808,59 @@ async fn run_attach_command(
         }
         Err(e) => {
             return Err(e.into());
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_events_command(
+    socket_path: std::path::PathBuf,
+    filter: Vec<String>,
+    include_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    // Connect to the server (don't auto-start - events are useless with no agents)
+    let stream = UnixStream::connect(&socket_path).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    // Send events request
+    let request = Request::Events {
+        filter,
+        include_output,
+    };
+    let mut json = serde_json::to_string(&request)?;
+    json.push('\n');
+    writer.write_all(json.as_bytes()).await?;
+
+    // Stream events to stdout
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 {
+            // Server disconnected
+            break;
+        }
+
+        // Parse and re-emit just the event (strip Response wrapper)
+        if let Ok(response) = serde_json::from_str::<Response>(&line) {
+            match response {
+                Response::Event(event) => {
+                    // Output the event as JSON (newline-delimited)
+                    let event_json = serde_json::to_string(&event)?;
+                    println!("{event_json}");
+                }
+                Response::Error { message } => {
+                    return Err(message.into());
+                }
+                _ => {
+                    // Ignore other responses
+                }
+            }
         }
     }
 

@@ -26,7 +26,7 @@ pub use screen::Screen;
 pub use transcript::Transcript;
 
 use crate::protocol::{
-    AgentInfo, AgentState, AttachEndReason, DumpFormat, Request, Response, TranscriptEntry,
+    AgentInfo, AgentState, AttachEndReason, DumpFormat, Event, Request, Response, TranscriptEntry,
 };
 use crate::pty;
 use nix::sys::signal::Signal;
@@ -67,6 +67,8 @@ pub struct Server {
     socket_path: PathBuf,
     manager: Arc<Mutex<AgentManager>>,
     shutdown_tx: broadcast::Sender<()>,
+    /// Broadcast channel for events (spawned, output, exited).
+    event_tx: broadcast::Sender<Event>,
 }
 
 impl Server {
@@ -74,10 +76,13 @@ impl Server {
     #[must_use] 
     pub fn new(socket_path: PathBuf) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
+        // Event channel with enough capacity for bursty output
+        let (event_tx, _) = broadcast::channel(1024);
         Self {
             socket_path,
             manager: Arc::new(Mutex::new(AgentManager::new())),
             shutdown_tx,
+            event_tx,
         }
     }
 
@@ -120,10 +125,11 @@ impl Server {
 
         // Start the PTY output reader task
         let manager = Arc::clone(&self.manager);
+        let event_tx = self.event_tx.clone();
         let mut pty_shutdown = self.shutdown_tx.subscribe();
         tokio::spawn(async move {
             tokio::select! {
-                () = pty_reader_task(manager) => {}
+                () = pty_reader_task(manager, event_tx) => {}
                 _ = pty_shutdown.recv() => {}
             }
         });
@@ -138,8 +144,9 @@ impl Server {
                             debug!("Accepted connection");
                             let manager = Arc::clone(&self.manager);
                             let shutdown_tx = self.shutdown_tx.clone();
+                            let event_tx = self.event_tx.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(stream, manager, shutdown_tx).await {
+                                if let Err(e) = handle_connection(stream, manager, shutdown_tx, event_tx).await {
                                     error!("Connection error: {}", e);
                                 }
                             });
@@ -173,6 +180,7 @@ async fn handle_connection(
     stream: UnixStream,
     manager: Arc<Mutex<AgentManager>>,
     shutdown_tx: broadcast::Sender<()>,
+    event_tx: broadcast::Sender<Event>,
 ) -> Result<(), ServerError> {
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -229,8 +237,30 @@ async fn handle_connection(
             return Ok(());
         }
 
+        // Handle events request specially - it switches to streaming mode
+        if let Request::Events { filter, include_output } = &request {
+            let events_result = handle_events(
+                filter.clone(),
+                *include_output,
+                writer,
+                &event_tx,
+            )
+            .await;
+
+            match events_result {
+                Ok(()) => {
+                    debug!("Events stream ended normally");
+                }
+                Err(e) => {
+                    warn!("Events stream error: {}", e);
+                }
+            }
+            // After events, the connection is done
+            return Ok(());
+        }
+
         let is_shutdown = matches!(request, Request::Shutdown);
-        let response = handle_request(request, &manager).await;
+        let response = handle_request(request, &manager, &event_tx).await;
 
         let mut json = serde_json::to_string(&response)
             .expect("Response serialization should never fail");
@@ -251,7 +281,11 @@ async fn handle_connection(
 }
 
 /// Handle a single request.
-async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) -> Response {
+async fn handle_request(
+    request: Request,
+    manager: &Arc<Mutex<AgentManager>>,
+    event_tx: &broadcast::Sender<Event>,
+) -> Response {
     match request {
         Request::Ping => Response::Pong,
 
@@ -303,9 +337,17 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
                         return Response::error(format!("agent name already in use: {id}"));
                     }
                     let pid = pty_process.pid.as_raw() as u32;
-                    let agent = Agent::new(id.clone(), cmd, pty_process, rows, cols);
+                    let agent = Agent::new(id.clone(), cmd.clone(), pty_process, rows, cols);
                     mgr.add(agent);
                     info!(%id, %pid, "Spawned agent");
+                    
+                    // Publish spawn event
+                    let _ = event_tx.send(Event::AgentSpawned {
+                        id: id.clone(),
+                        pid,
+                        command: cmd,
+                    });
+                    
                     Response::Spawned { id, pid }
                 }
                 Err(e) => Response::error(format!("spawn failed: {e}")),
@@ -486,6 +528,12 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
             }
         }
 
+        Request::Events { .. } => {
+            // Events is handled specially in handle_connection
+            // If we get here, something went wrong
+            Response::error("events request should not reach handle_request")
+        }
+
         Request::Shutdown => {
             info!("Shutdown requested");
             // TODO: Actually trigger shutdown
@@ -577,6 +625,65 @@ async fn handle_attach(
     info!("Attach ended for agent {}", agent_id);
 
     result.map(|_| ())
+}
+
+/// Handle event streaming - subscribe to agent lifecycle events.
+async fn handle_events(
+    filter: Vec<String>,
+    include_output: bool,
+    mut writer: OwnedWriteHalf,
+    event_tx: &broadcast::Sender<Event>,
+) -> Result<(), ServerError> {
+    let mut event_rx = event_tx.subscribe();
+    
+    info!(?filter, %include_output, "Events subscription started");
+
+    loop {
+        match event_rx.recv().await {
+            Ok(event) => {
+                // Filter by agent ID if specified
+                let agent_id = match &event {
+                    Event::AgentSpawned { id, .. }
+                    | Event::AgentOutput { id, .. }
+                    | Event::AgentExited { id, .. } => id,
+                };
+
+                // Skip if not in filter (unless filter is empty = all)
+                if !filter.is_empty() && !filter.contains(agent_id) {
+                    continue;
+                }
+
+                // Skip output events if not requested
+                if !include_output && matches!(event, Event::AgentOutput { .. }) {
+                    continue;
+                }
+
+                // Send event to client
+                let response = Response::Event(event);
+                let mut json = serde_json::to_string(&response)
+                    .expect("Response serialization should never fail");
+                json.push('\n');
+                
+                if writer.write_all(json.as_bytes()).await.is_err() {
+                    // Client disconnected
+                    debug!("Events client disconnected");
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                // Channel closed (server shutting down)
+                debug!("Events channel closed");
+                break;
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                // We missed some events - log but continue
+                warn!("Events subscriber lagged, missed {n} events");
+            }
+        }
+    }
+
+    info!("Events subscription ended");
+    Ok(())
 }
 
 /// Run the attach mode I/O bridge.
@@ -691,7 +798,7 @@ async fn run_attach_bridge(
 }
 
 /// Background task that reads from PTY masters and updates transcripts/screens.
-async fn pty_reader_task(manager: Arc<Mutex<AgentManager>>) {
+async fn pty_reader_task(manager: Arc<Mutex<AgentManager>>, event_tx: broadcast::Sender<Event>) {
     use tokio::time::{interval, Duration};
 
     let mut poll_interval = interval(Duration::from_millis(10));
@@ -724,6 +831,12 @@ async fn pty_reader_task(manager: Arc<Mutex<AgentManager>>) {
                         let data = &buf[..n];
                         agent.transcript.append(data);
                         agent.screen.process(data);
+                        
+                        // Publish output event
+                        let _ = event_tx.send(Event::AgentOutput {
+                            id: id.clone(),
+                            data: data.to_vec(),
+                        });
                     }
                     // No data available (empty read or EAGAIN/EWOULDBLOCK)
                     Ok(_) | Err(nix::Error::EAGAIN) => {}
@@ -732,6 +845,12 @@ async fn pty_reader_task(manager: Arc<Mutex<AgentManager>>) {
                         if let Ok(Some(code)) = agent.pty.try_wait() {
                             agent.state = InternalAgentState::Exited { code };
                             info!(%id, %code, "Agent exited");
+                            
+                            // Publish exit event
+                            let _ = event_tx.send(Event::AgentExited {
+                                id: id.clone(),
+                                exit_code: Some(code),
+                            });
                         }
                     }
                     Err(e) => {
@@ -744,6 +863,12 @@ async fn pty_reader_task(manager: Arc<Mutex<AgentManager>>) {
                     && let Ok(Some(code)) = agent.pty.try_wait() {
                         agent.state = InternalAgentState::Exited { code };
                         info!(%id, %code, "Agent exited");
+                        
+                        // Publish exit event
+                        let _ = event_tx.send(Event::AgentExited {
+                            id: id.clone(),
+                            exit_code: Some(code),
+                        });
                     }
             }
         }

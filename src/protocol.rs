@@ -122,6 +122,17 @@ pub enum Request {
 
     /// Ping the server (for health checks / auto-start detection).
     Ping,
+
+    /// Subscribe to event stream.
+    /// Server will send Event responses until the connection is closed.
+    Events {
+        /// Filter to specific agent IDs (empty = all agents).
+        #[serde(default)]
+        filter: Vec<String>,
+        /// Include output events (can be noisy).
+        #[serde(default)]
+        include_output: bool,
+    },
 }
 
 /// Information about a single agent.
@@ -242,6 +253,9 @@ pub enum Response {
         /// Reason for ending.
         reason: AttachEndReason,
     },
+
+    /// Server event (sent during event subscription).
+    Event(Event),
 }
 
 /// Reason attach mode ended.
@@ -254,6 +268,38 @@ pub enum AttachEndReason {
     AgentExited { exit_code: Option<i32> },
     /// An error occurred.
     Error { message: String },
+}
+
+/// Events streamed from the server.
+///
+/// Used with the `botty events` command for reactive orchestration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum Event {
+    /// An agent was spawned.
+    AgentSpawned {
+        /// Agent ID.
+        id: String,
+        /// Process ID.
+        pid: u32,
+        /// Command that was spawned.
+        command: Vec<String>,
+    },
+    /// An agent produced output.
+    AgentOutput {
+        /// Agent ID.
+        id: String,
+        /// Output data (base64 encoded in JSON).
+        #[serde(with = "base64_bytes")]
+        data: Vec<u8>,
+    },
+    /// An agent exited.
+    AgentExited {
+        /// Agent ID.
+        id: String,
+        /// Exit code (None if killed by signal).
+        exit_code: Option<i32>,
+    },
 }
 
 impl Response {
@@ -347,6 +393,10 @@ mod tests {
             },
             Request::Ping,
             Request::Shutdown,
+            Request::Events {
+                filter: vec!["agent-1".into()],
+                include_output: true,
+            },
         ];
 
         for req in requests {
@@ -386,6 +436,19 @@ mod tests {
                 size: (24, 80),
             },
             Response::error("agent not found"),
+            Response::Event(Event::AgentSpawned {
+                id: "test-agent".into(),
+                pid: 12345,
+                command: vec!["bash".into()],
+            }),
+            Response::Event(Event::AgentOutput {
+                id: "test-agent".into(),
+                data: b"hello".to_vec(),
+            }),
+            Response::Event(Event::AgentExited {
+                id: "test-agent".into(),
+                exit_code: Some(0),
+            }),
         ];
 
         for resp in responses {
