@@ -205,7 +205,16 @@ async fn run_client(
             }
         }
 
-        Command::Tail { id, lines, follow } => {
+        Command::Tail { id, lines, follow, raw } => {
+            // Helper to strip ANSI codes if not raw mode
+            let process_output = |data: &[u8], raw: bool| -> Vec<u8> {
+                if raw {
+                    data.to_vec()
+                } else {
+                    strip_ansi_escapes::strip(data)
+                }
+            };
+
             if follow {
                 // Follow mode: continuously poll for new output
                 use std::time::Duration;
@@ -227,7 +236,8 @@ async fn run_client(
                             // Only print new data
                             if data.len() > last_len {
                                 let new_data = &data[last_len..];
-                                std::io::stdout().write_all(new_data)?;
+                                let output = process_output(new_data, raw);
+                                std::io::stdout().write_all(&output)?;
                                 std::io::stdout().flush()?;
                                 last_len = data.len();
                             }
@@ -257,7 +267,8 @@ async fn run_client(
 
                 match response {
                     Response::Output { data } => {
-                        std::io::stdout().write_all(&data)?;
+                        let output = process_output(&data, raw);
+                        std::io::stdout().write_all(&output)?;
                         std::io::stdout().flush()?;
                     }
                     Response::Error { message } => {

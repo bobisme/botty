@@ -137,6 +137,10 @@ pub enum Command {
         /// Follow output (like tail -f).
         #[arg(short, long)]
         follow: bool,
+
+        /// Show raw output including ANSI escape codes.
+        #[arg(long)]
+        raw: bool,
     },
 
     /// Dump agent transcript.
