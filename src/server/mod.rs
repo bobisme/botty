@@ -399,6 +399,11 @@ async fn handle_request(
             
             let mgr = manager.lock().await;
             if let Some(agent) = mgr.get(&id) {
+                // Check if agent already exited
+                if !agent.is_running() {
+                    info!(%id, "Agent already exited, nothing to kill");
+                    return Response::Ok;
+                }
                 let sig = Signal::try_from(signal).unwrap_or(Signal::SIGTERM);
                 match agent.pty.signal(sig) {
                     Ok(()) => {
