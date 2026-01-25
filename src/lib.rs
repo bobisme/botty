@@ -11,7 +11,7 @@ pub mod pty;
 pub mod server;
 
 pub use attach::{run_attach, AttachConfig, AttachError};
-pub use cli::{Cli, Command};
+pub use cli::{parse_key_notation, Cli, Command};
 pub use client::{default_socket_path, Client, ClientError};
 pub use protocol::{AgentInfo, AgentState, DumpFormat, Request, Response};
 pub use server::{Server, ServerError};

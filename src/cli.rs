@@ -3,6 +3,48 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Parse a key notation string into a byte value.
+///
+/// Supported formats:
+/// - `ctrl-X` or `ctrl+X` - Control character (e.g., `ctrl-g` = 0x07)
+/// - `^X` - Control character shorthand (e.g., `^G` = 0x07)
+/// - Single character - Literal character (e.g., `d` = 0x64)
+///
+/// Returns None if the notation is invalid.
+pub fn parse_key_notation(s: &str) -> Option<u8> {
+    let s = s.trim().to_lowercase();
+
+    // ctrl-X or ctrl+X format
+    if let Some(rest) = s.strip_prefix("ctrl-").or_else(|| s.strip_prefix("ctrl+")) {
+        if rest.len() == 1 {
+            let c = rest.chars().next()?;
+            if c.is_ascii_alphabetic() {
+                // ctrl-a = 0x01, ctrl-z = 0x1a
+                return Some((c as u8) - b'a' + 1);
+            }
+        }
+        return None;
+    }
+
+    // ^X format
+    if let Some(rest) = s.strip_prefix('^') {
+        if rest.len() == 1 {
+            let c = rest.chars().next()?;
+            if c.is_ascii_alphabetic() {
+                return Some((c as u8) - b'a' + 1);
+            }
+        }
+        return None;
+    }
+
+    // Single character
+    if s.len() == 1 {
+        return Some(s.as_bytes()[0]);
+    }
+
+    None
+}
+
 /// PTY-based agent runtime.
 #[derive(Debug, Parser)]
 #[command(name = "botty", version, about)]
@@ -117,6 +159,12 @@ pub enum Command {
         /// Read-only mode.
         #[arg(long)]
         readonly: bool,
+
+        /// Detach key prefix (default: ctrl-g).
+        /// Press this followed by 'd' to detach.
+        /// Formats: ctrl-X, ^X, or single char.
+        #[arg(long, default_value = "ctrl-g")]
+        detach_key: String,
     },
 
     /// Run the server (usually started automatically).
@@ -128,4 +176,45 @@ pub enum Command {
 
     /// Shut down the server.
     Shutdown,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_key_notation_ctrl_format() {
+        assert_eq!(parse_key_notation("ctrl-a"), Some(0x01));
+        assert_eq!(parse_key_notation("ctrl-g"), Some(0x07));
+        assert_eq!(parse_key_notation("ctrl-z"), Some(0x1a));
+        assert_eq!(parse_key_notation("ctrl+a"), Some(0x01));
+        assert_eq!(parse_key_notation("CTRL-A"), Some(0x01));
+        assert_eq!(parse_key_notation("Ctrl-G"), Some(0x07));
+    }
+
+    #[test]
+    fn test_parse_key_notation_caret_format() {
+        assert_eq!(parse_key_notation("^a"), Some(0x01));
+        assert_eq!(parse_key_notation("^g"), Some(0x07));
+        assert_eq!(parse_key_notation("^G"), Some(0x07));
+        assert_eq!(parse_key_notation("^Z"), Some(0x1a));
+    }
+
+    #[test]
+    fn test_parse_key_notation_single_char() {
+        assert_eq!(parse_key_notation("d"), Some(b'd'));
+        assert_eq!(parse_key_notation("x"), Some(b'x'));
+        // Note: single chars are lowercased for consistency
+        assert_eq!(parse_key_notation("D"), Some(b'd'));
+    }
+
+    #[test]
+    fn test_parse_key_notation_invalid() {
+        assert_eq!(parse_key_notation("ctrl-"), None);
+        assert_eq!(parse_key_notation("ctrl-ab"), None);
+        assert_eq!(parse_key_notation("^"), None);
+        assert_eq!(parse_key_notation("^ab"), None);
+        assert_eq!(parse_key_notation("ab"), None);
+        assert_eq!(parse_key_notation(""), None);
+    }
 }

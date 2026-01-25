@@ -54,8 +54,8 @@ async fn run_client(
     command: Command,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Attach command needs direct socket access, handle it separately
-    if let Command::Attach { id, readonly } = command {
-        return run_attach_command(socket_path, id, readonly).await;
+    if let Command::Attach { id, readonly, detach_key } = command {
+        return run_attach_command(socket_path, id, readonly, detach_key).await;
     }
 
     let mut client = Client::new(socket_path);
@@ -268,8 +268,14 @@ async fn run_attach_command(
     socket_path: std::path::PathBuf,
     id: String,
     readonly: bool,
+    detach_key: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use botty::cli::parse_key_notation;
     use tokio::net::UnixStream;
+
+    // Parse detach key
+    let detach_prefix = parse_key_notation(&detach_key)
+        .ok_or_else(|| format!("invalid detach key notation: {detach_key}"))?;
 
     // Connect to the server
     let mut stream = match UnixStream::connect(&socket_path).await {
@@ -295,6 +301,7 @@ async fn run_attach_command(
     };
 
     let config = AttachConfig {
+        detach_prefix,
         readonly,
         ..Default::default()
     };
