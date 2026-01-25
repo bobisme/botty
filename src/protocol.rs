@@ -8,18 +8,15 @@ use serde::{Deserialize, Serialize};
 /// Format for transcript dump output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum DumpFormat {
     /// Plain text output.
+    #[default]
     Text,
     /// JSON Lines with timestamps per chunk.
     Jsonl,
 }
 
-impl Default for DumpFormat {
-    fn default() -> Self {
-        Self::Text
-    }
-}
 
 /// Requests from client to server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,7 +224,7 @@ pub enum Response {
     /// - Client sends raw bytes (prefixed with length) which go to agent PTY
     /// - Server sends raw bytes (prefixed with length) from agent PTY output
     /// - A zero-length message from client signals detach
-    /// - AgentExited is sent if agent exits during attach
+    /// - `AgentExited` is sent if agent exits during attach
     AttachStarted {
         /// Agent ID.
         id: String,
@@ -264,19 +261,19 @@ impl Response {
 }
 
 // Default value helpers
-fn default_rows() -> u16 {
+const fn default_rows() -> u16 {
     24
 }
-fn default_cols() -> u16 {
+const fn default_cols() -> u16 {
     80
 }
-fn default_signal() -> i32 {
+const fn default_signal() -> i32 {
     15 // SIGTERM
 }
-fn default_tail_lines() -> usize {
+const fn default_tail_lines() -> usize {
     10
 }
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 

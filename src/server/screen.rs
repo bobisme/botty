@@ -7,6 +7,7 @@ pub struct Screen {
 
 impl Screen {
     /// Create a new screen with the given dimensions.
+    #[must_use]
     pub fn new(rows: u16, cols: u16) -> Self {
         Self {
             parser: vt100::Parser::new(rows, cols, 0),
@@ -20,6 +21,7 @@ impl Screen {
 
     /// Get the current screen contents as a string.
     /// Each row is separated by a newline.
+    #[must_use]
     pub fn contents(&self) -> String {
         self.parser.screen().contents()
     }
@@ -27,7 +29,11 @@ impl Screen {
     /// Get the screen contents with ANSI formatting codes preserved.
     /// This returns the screen text with color/style escape codes but without
     /// cursor positioning or screen-clearing sequences.
+    #[must_use]
+    #[allow(clippy::similar_names)] // fg/bg are intentionally similar
+    #[allow(clippy::too_many_lines)] // Complex function, splitting would reduce clarity
     pub fn contents_formatted(&self) -> String {
+        use std::fmt::Write;
         let screen = self.parser.screen();
         let (rows, cols) = screen.size();
         let mut result = String::new();
@@ -85,11 +91,11 @@ impl Screen {
                                 } else if n < 16 {
                                     sgr.push(format!("{}", 90 + n - 8));
                                 } else {
-                                    sgr.push(format!("38;5;{}", n));
+                                    sgr.push(format!("38;5;{n}"));
                                 }
                             }
                             vt100::Color::Rgb(r, g, b) => {
-                                sgr.push(format!("38;2;{};{};{}", r, g, b));
+                                sgr.push(format!("38;2;{r};{g};{b}"));
                             }
                         }
 
@@ -102,11 +108,11 @@ impl Screen {
                                 } else if n < 16 {
                                     sgr.push(format!("{}", 100 + n - 8));
                                 } else {
-                                    sgr.push(format!("48;5;{}", n));
+                                    sgr.push(format!("48;5;{n}"));
                                 }
                             }
                             vt100::Color::Rgb(r, g, b) => {
-                                sgr.push(format!("48;2;{};{};{}", r, g, b));
+                                sgr.push(format!("48;2;{r};{g};{b}"));
                             }
                         }
 
@@ -131,7 +137,7 @@ impl Screen {
                             // First flush any trailing spaces before the escape
                             row_text.push_str(&" ".repeat(trailing_spaces));
                             trailing_spaces = 0;
-                            row_text.push_str(&format!("\x1b[{}m", sgr.join(";")));
+                            let _ = write!(row_text, "\x1b[{}m", sgr.join(";"));
                         }
 
                         current_fg = Some(fg);
@@ -191,16 +197,19 @@ impl Screen {
     }
 
     /// Get the cursor position (row, col), 0-indexed.
+    #[must_use]
     pub fn cursor_position(&self) -> (u16, u16) {
         self.parser.screen().cursor_position()
     }
 
     /// Get the screen size (rows, cols).
+    #[must_use]
     pub fn size(&self) -> (u16, u16) {
         self.parser.screen().size()
     }
 
     /// Check if the alternate screen is active.
+    #[must_use]
     pub fn alternate_screen(&self) -> bool {
         self.parser.screen().alternate_screen()
     }
@@ -214,13 +223,14 @@ impl Screen {
 
     /// Get a snapshot of the screen as normalized text.
     /// Strips ANSI codes and trailing whitespace.
+    #[must_use]
     pub fn snapshot(&self) -> String {
         // contents() already strips formatting
         let contents = self.parser.screen().contents();
         let mut lines: Vec<&str> = contents.lines().collect();
 
         // Trim trailing empty lines
-        while lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        while lines.last().is_some_and(|l| l.trim().is_empty()) {
             lines.pop();
         }
 

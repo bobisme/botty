@@ -45,14 +45,16 @@ pub enum ClientError {
 }
 
 /// Get the default socket path for the botty server.
+#[must_use]
 pub fn default_socket_path() -> PathBuf {
-    if let Some(runtime_dir) = dirs::runtime_dir() {
-        runtime_dir.join("botty.sock")
-    } else {
-        // Fallback to /tmp/botty-$UID.sock
-        let uid = unsafe { libc::getuid() };
-        PathBuf::from(format!("/tmp/botty-{uid}.sock"))
-    }
+    dirs::runtime_dir().map_or_else(
+        || {
+            // Fallback to /tmp/botty-$UID.sock
+            let uid = unsafe { libc::getuid() };
+            PathBuf::from(format!("/tmp/botty-{uid}.sock"))
+        },
+        |runtime_dir| runtime_dir.join("botty.sock"),
+    )
 }
 
 /// Client for the botty server.
@@ -63,7 +65,8 @@ pub struct Client {
 
 impl Client {
     /// Create a new client that will connect to the given socket path.
-    pub fn new(socket_path: PathBuf) -> Self {
+    #[must_use] 
+    pub const fn new(socket_path: PathBuf) -> Self {
         Self {
             socket_path,
             stream: None,
@@ -71,6 +74,7 @@ impl Client {
     }
 
     /// Create a client with the default socket path.
+    #[must_use] 
     pub fn with_default_path() -> Self {
         Self::new(default_socket_path())
     }
@@ -117,6 +121,7 @@ impl Client {
     }
 
     /// Start the server as a background process.
+    #[allow(clippy::unused_async)] // async for API consistency with other methods
     async fn start_server(&self) -> Result<(), ClientError> {
         info!("Starting server...");
 

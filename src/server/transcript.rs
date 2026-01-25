@@ -1,5 +1,8 @@
 //! Transcript ring buffer.
 
+// Timestamp won't overflow u64 until year 584942417355
+#![allow(clippy::cast_possible_truncation)]
+
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,7 +27,8 @@ pub struct Transcript {
 
 impl Transcript {
     /// Create a new transcript buffer with the given maximum size.
-    pub fn new(max_size: usize) -> Self {
+    #[must_use]
+    pub const fn new(max_size: usize) -> Self {
         Self {
             max_size,
             current_size: 0,
@@ -65,6 +69,7 @@ impl Transcript {
     }
 
     /// Get all entries since a given timestamp.
+    #[must_use]
     pub fn since(&self, timestamp: u64) -> Vec<&TranscriptEntry> {
         self.entries
             .iter()
@@ -73,6 +78,7 @@ impl Transcript {
     }
 
     /// Get the last N bytes of output.
+    #[must_use]
     pub fn tail_bytes(&self, n: usize) -> Vec<u8> {
         let mut result = Vec::new();
         for entry in self.entries.iter().rev() {
@@ -92,7 +98,8 @@ impl Transcript {
     }
 
     /// Get the total size of data in the buffer.
-    pub fn size(&self) -> usize {
+    #[must_use]
+    pub const fn size(&self) -> usize {
         self.current_size
     }
 

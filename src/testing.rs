@@ -96,7 +96,7 @@ impl TestHarness {
         cols: u16,
     ) -> Result<AgentHandle, TestError> {
         let request = Request::Spawn {
-            cmd: cmd.iter().map(|s| s.to_string()).collect(),
+            cmd: cmd.iter().map(std::string::ToString::to_string).collect(),
             rows,
             cols,
             name: None,
@@ -138,7 +138,8 @@ impl TestHarness {
     }
 
     /// Get the socket path (useful for direct connections).
-    pub fn socket_path(&self) -> &PathBuf {
+    #[must_use] 
+    pub const fn socket_path(&self) -> &PathBuf {
         &self.socket_path
     }
 
@@ -167,6 +168,7 @@ pub struct AgentHandle {
 
 impl AgentHandle {
     /// Get the agent ID.
+    #[must_use] 
     pub fn id(&self) -> &str {
         &self.id
     }

@@ -49,6 +49,7 @@ async fn run_server(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Command dispatch function, splitting would reduce clarity
 async fn run_client(
     socket_path: std::path::PathBuf,
     command: Command,
@@ -135,7 +136,7 @@ async fn run_client(
                             }).collect::<Vec<_>>()
                         });
                         let toon = toon_format::encode(&json_data, &toon_format::EncodeOptions::default())
-                            .unwrap_or_else(|_| format!("{:?}", json_data));
+                            .unwrap_or_else(|_| format!("{json_data:?}"));
                         println!("{toon}");
                     }
                 }
@@ -335,7 +336,8 @@ async fn run_client(
             }
         }
 
-        Command::Attach { .. } => {
+        // These commands are handled before this match
+        Command::Attach { .. } | Command::Server { .. } => {
             unreachable!("handled above")
         }
 
@@ -420,10 +422,6 @@ async fn run_client(
                     return Err("unexpected response".into());
                 }
             }
-        }
-
-        Command::Server { .. } => {
-            unreachable!("handled above")
         }
 
         Command::Exec {
@@ -538,8 +536,8 @@ async fn run_client(
                         let code_start = exit_code_start + marker_prefix.len();
                         if let Some(code_end) = after_marker[code_start..].find("__") {
                             let code_str = &after_marker[code_start..code_start + code_end];
-                            if let Ok(code) = code_str.parse::<i32>() {
-                                if code != 0 {
+                            if let Ok(code) = code_str.parse::<i32>()
+                                && code != 0 {
                                     // Kill agent, print output, then exit with the command's exit code
                                     let _ = client
                                         .request(Request::Kill {
@@ -552,7 +550,6 @@ async fn run_client(
                                     }
                                     std::process::exit(code);
                                 }
-                            }
                         }
                     }
                     break;
@@ -626,13 +623,13 @@ async fn run_attach_command(
             use botty::protocol::AttachEndReason;
             match reason {
                 AttachEndReason::Detached => {
-                    eprintln!("\r\nDetached from {}", id);
+                    eprintln!("\r\nDetached from {id}");
                 }
                 AttachEndReason::AgentExited { exit_code } => {
                     if let Some(code) = exit_code {
-                        eprintln!("\r\nAgent {} exited with code {}", id, code);
+                        eprintln!("\r\nAgent {id} exited with code {code}");
                     } else {
-                        eprintln!("\r\nAgent {} exited", id);
+                        eprintln!("\r\nAgent {id} exited");
                     }
                 }
                 AttachEndReason::Error { message } => {

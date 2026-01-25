@@ -11,6 +11,7 @@ pub struct AgentManager {
 
 impl AgentManager {
     /// Create a new agent manager.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             agents: HashMap::new(),
@@ -32,7 +33,7 @@ impl AgentManager {
             // If used, append a counter
             let counter = self.name_counter.entry(base_name.clone()).or_insert(1);
             *counter += 1;
-            let numbered_name = format!("{}-{}", base_name, counter);
+            let numbered_name = format!("{base_name}-{counter}");
 
             if !self.agents.contains_key(&numbered_name) {
                 return numbered_name;
@@ -46,6 +47,7 @@ impl AgentManager {
     }
 
     /// Get an agent by ID.
+    #[must_use] 
     pub fn get(&self, id: &str) -> Option<&Agent> {
         self.agents.get(id)
     }
@@ -66,11 +68,13 @@ impl AgentManager {
     }
 
     /// Get the number of agents.
+    #[must_use] 
     pub fn len(&self) -> usize {
         self.agents.len()
     }
 
     /// Check if there are no agents.
+    #[must_use] 
     pub fn is_empty(&self) -> bool {
         self.agents.is_empty()
     }

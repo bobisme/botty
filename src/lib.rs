@@ -3,6 +3,9 @@
 //! A tmux-style, user-scoped PTY server for running and coordinating
 //! interactive agents as terminal programs.
 
+// Error documentation is deferred - the errors are self-explanatory from types
+#![allow(clippy::missing_errors_doc)]
+
 pub mod attach;
 pub mod cli;
 pub mod client;

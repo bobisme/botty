@@ -3,6 +3,18 @@
 //! Owns PTYs, agents, transcripts, and virtual screens.
 //! Listens on a Unix socket for client requests.
 
+// These casts are intentional and safe:
+// - PIDs are always positive (i32 -> u32)  
+// - Timestamps won't overflow u64 until year 584942417355
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_possible_truncation)]
+// This module has complex control flow that doesn't benefit from map_or_else
+#![allow(clippy::option_if_let_else)]
+// The handle_request function is large but logically coherent
+#![allow(clippy::too_many_lines)]
+// Dropping mutex guards explicitly adds noise without benefit
+#![allow(clippy::significant_drop_tightening)]
+
 mod agent;
 mod manager;
 mod screen;
@@ -59,6 +71,7 @@ pub struct Server {
 
 impl Server {
     /// Create a new server that will listen on the given socket path.
+    #[must_use] 
     pub fn new(socket_path: PathBuf) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
         Self {
@@ -77,8 +90,7 @@ impl Server {
                 .map_err(ServerError::Io)?;
             
             if metadata.file_type().is_symlink() {
-                return Err(ServerError::Bind(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(ServerError::Bind(std::io::Error::other(
                     "socket path is a symlink - possible security attack",
                 )));
             }
@@ -111,7 +123,7 @@ impl Server {
         let mut pty_shutdown = self.shutdown_tx.subscribe();
         tokio::spawn(async move {
             tokio::select! {
-                _ = pty_reader_task(manager) => {}
+                () = pty_reader_task(manager) => {}
                 _ = pty_shutdown.recv() => {}
             }
         });
@@ -183,8 +195,9 @@ async fn handle_connection(
         let request: Request = match serde_json::from_str(&line) {
             Ok(req) => req,
             Err(e) => {
-                let response = Response::error(format!("invalid request: {}", e));
-                let mut json = serde_json::to_string(&response).unwrap();
+                let response = Response::error(format!("invalid request: {e}"));
+                let mut json = serde_json::to_string(&response)
+                    .expect("Response serialization should never fail");
                 json.push('\n');
                 writer.write_all(json.as_bytes()).await.ok();
                 continue;
@@ -205,7 +218,7 @@ async fn handle_connection(
             .await;
 
             match attach_result {
-                Ok(_) => {
+                Ok(()) => {
                     debug!("Attach session ended normally");
                 }
                 Err(e) => {
@@ -219,7 +232,8 @@ async fn handle_connection(
         let is_shutdown = matches!(request, Request::Shutdown);
         let response = handle_request(request, &manager).await;
 
-        let mut json = serde_json::to_string(&response).unwrap();
+        let mut json = serde_json::to_string(&response)
+            .expect("Response serialization should never fail");
         json.push('\n');
         writer
             .write_all(json.as_bytes())
@@ -276,7 +290,7 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
                     info!(%id, %pid, "Spawned agent");
                     Response::Spawned { id, pid }
                 }
-                Err(e) => Response::error(format!("spawn failed: {}", e)),
+                Err(e) => Response::error(format!("spawn failed: {e}")),
             }
         }
 
@@ -312,7 +326,7 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
         Request::Kill { id, signal } => {
             // Validate signal number - only allow standard signals (1-31)
             // Real-time signals (32-64) and invalid numbers are rejected
-            if signal < 1 || signal > 31 {
+            if !(1..=31).contains(&signal) {
                 return Response::error(format!("invalid signal number: {signal} (must be 1-31)"));
             }
             
@@ -320,7 +334,7 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
             if let Some(agent) = mgr.get(&id) {
                 let sig = Signal::try_from(signal).unwrap_or(Signal::SIGTERM);
                 match agent.pty.signal(sig) {
-                    Ok(_) => {
+                    Ok(()) => {
                         info!(%id, ?sig, "Sent signal to agent");
                         Response::Ok
                     }
@@ -347,10 +361,10 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
                 match nix::unistd::write(borrowed_fd, &bytes)
                 {
                     Ok(_) => Response::Ok,
-                    Err(e) => Response::error(format!("write failed: {}", e)),
+                    Err(e) => Response::error(format!("write failed: {e}")),
                 }
             } else {
-                Response::error(format!("agent not found: {}", id))
+                Response::error(format!("agent not found: {id}"))
             }
         }
 
@@ -364,10 +378,10 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
                 match nix::unistd::write(borrowed_fd, &data)
                 {
                     Ok(_) => Response::Ok,
-                    Err(e) => Response::error(format!("write failed: {}", e)),
+                    Err(e) => Response::error(format!("write failed: {e}")),
                 }
             } else {
-                Response::error(format!("agent not found: {}", id))
+                Response::error(format!("agent not found: {id}"))
             }
         }
 
@@ -383,7 +397,7 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
                 let data = agent.transcript.tail_bytes(4096);
                 Response::Output { data }
             } else {
-                Response::error(format!("agent not found: {}", id))
+                Response::error(format!("agent not found: {id}"))
             }
         }
 
@@ -419,7 +433,7 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
                     }
                 }
             } else {
-                Response::error(format!("agent not found: {}", id))
+                Response::error(format!("agent not found: {id}"))
             }
         }
 
@@ -439,7 +453,7 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
                     size,
                 }
             } else {
-                Response::error(format!("agent not found: {}", id))
+                Response::error(format!("agent not found: {id}"))
             }
         }
 
@@ -450,7 +464,7 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
             if mgr.get(&id).is_some() {
                 Response::error("attach request should not reach handle_request")
             } else {
-                Response::error(format!("agent not found: {}", id))
+                Response::error(format!("agent not found: {id}"))
             }
         }
 
@@ -473,26 +487,25 @@ async fn handle_attach(
     // Check if agent exists, get initial info, and mark as attached
     let size = {
         let mut mgr = manager.lock().await;
-        match mgr.get_mut(&agent_id) {
-            Some(agent) => {
-                if !agent.is_running() {
-                    let response = Response::error(format!("agent {agent_id} has exited"));
-                    let mut json = serde_json::to_string(&response).unwrap();
-                    json.push('\n');
-                    writer.write_all(json.as_bytes()).await.ok();
-                    return Ok(());
-                }
-                // Mark agent as attached so pty_reader_task skips it
-                agent.attached = true;
-                agent.screen.size()
-            }
-            None => {
-                let response = Response::error(format!("agent not found: {agent_id}"));
-                let mut json = serde_json::to_string(&response).unwrap();
+        if let Some(agent) = mgr.get_mut(&agent_id) {
+            if !agent.is_running() {
+                let response = Response::error(format!("agent {agent_id} has exited"));
+                let mut json = serde_json::to_string(&response)
+                    .expect("Response serialization should never fail");
                 json.push('\n');
                 writer.write_all(json.as_bytes()).await.ok();
                 return Ok(());
             }
+            // Mark agent as attached so pty_reader_task skips it
+            agent.attached = true;
+            agent.screen.size()
+        } else {
+            let response = Response::error(format!("agent not found: {agent_id}"));
+            let mut json = serde_json::to_string(&response)
+                .expect("Response serialization should never fail");
+            json.push('\n');
+            writer.write_all(json.as_bytes()).await.ok();
+            return Ok(());
         }
     };
 
@@ -501,7 +514,8 @@ async fn handle_attach(
         id: agent_id.clone(),
         size,
     };
-    let mut json = serde_json::to_string(&response).unwrap();
+    let mut json = serde_json::to_string(&response)
+        .expect("Response serialization should never fail");
     json.push('\n');
     writer
         .write_all(json.as_bytes())
@@ -537,7 +551,8 @@ async fn handle_attach(
     };
 
     let response = Response::AttachEnded { reason: end_reason };
-    let mut json = serde_json::to_string(&response).unwrap();
+    let mut json = serde_json::to_string(&response)
+        .expect("Response serialization should never fail");
     json.push('\n');
     writer.write_all(json.as_bytes()).await.ok();
 
@@ -548,9 +563,9 @@ async fn handle_attach(
 
 /// Run the attach mode I/O bridge.
 ///
-/// Note on FD safety: We don't pass pty_fd as a parameter anymore. Instead, we
+/// Note on FD safety: We don't pass `pty_fd` as a parameter anymore. Instead, we
 /// always get the fd from the agent while holding the manager lock. This ensures
-/// the fd is valid because the Agent (and its PtyProcess) cannot be dropped while
+/// the fd is valid because the Agent (and its `PtyProcess`) cannot be dropped while
 /// we hold the lock.
 async fn run_attach_bridge(
     agent_id: &str,
@@ -633,12 +648,8 @@ async fn run_attach_bridge(
                             drop(mgr); // Release lock before async write
                             writer.write_all(data).await.map_err(ServerError::Io)?;
                         }
-                        Ok(_) => {
-                            // No data
-                        }
-                        Err(nix::Error::EAGAIN) => {
-                            // No data available
-                        }
+                        // No data available (empty read or EAGAIN)
+                        Ok(_) | Err(nix::Error::EAGAIN) => {}
                         Err(nix::Error::EIO) => {
                             // PTY closed - agent probably exited
                             if let Ok(Some(code)) = agent.pty.try_wait() {
@@ -696,13 +707,8 @@ async fn pty_reader_task(manager: Arc<Mutex<AgentManager>>) {
                         agent.transcript.append(data);
                         agent.screen.process(data);
                     }
-                    Ok(_) => {
-                        // No data available
-                    }
-                    Err(nix::Error::EAGAIN) => {
-                        // No data available (non-blocking)
-                        // Note: EWOULDBLOCK == EAGAIN on Linux
-                    }
+                    // No data available (empty read or EAGAIN/EWOULDBLOCK)
+                    Ok(_) | Err(nix::Error::EAGAIN) => {}
                     Err(nix::Error::EIO) => {
                         // PTY closed - child probably exited
                         if let Ok(Some(code)) = agent.pty.try_wait() {
@@ -716,12 +722,11 @@ async fn pty_reader_task(manager: Arc<Mutex<AgentManager>>) {
                 }
 
                 // Check if child exited
-                if agent.is_running() {
-                    if let Ok(Some(code)) = agent.pty.try_wait() {
+                if agent.is_running()
+                    && let Ok(Some(code)) = agent.pty.try_wait() {
                         agent.state = InternalAgentState::Exited { code };
                         info!(%id, %code, "Agent exited");
                     }
-                }
             }
         }
     }

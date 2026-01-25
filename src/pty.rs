@@ -9,6 +9,7 @@
 
 #![allow(unsafe_code)]
 
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::pty::{openpty, OpenptyResult, Winsize};
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
@@ -60,6 +61,7 @@ pub struct PtyProcess {
 
 impl PtyProcess {
     /// Get the raw file descriptor of the master PTY.
+    #[must_use]
     pub fn master_fd(&self) -> RawFd {
         self.master.as_raw_fd()
     }
@@ -70,12 +72,12 @@ impl PtyProcess {
     }
 
     /// Check if the child process has exited without blocking.
-    /// Returns Some(exit_code) if exited, None if still running.
+    /// Returns `Some(exit_code)` if exited, None if still running.
     pub fn try_wait(&self) -> Result<Option<i32>, PtyError> {
         match waitpid(self.pid, Some(WaitPidFlag::WNOHANG)).map_err(PtyError::Wait)? {
             WaitStatus::Exited(_, code) => Ok(Some(code)),
             WaitStatus::Signaled(_, sig, _) => Ok(Some(128 + sig as i32)),
-            WaitStatus::StillAlive => Ok(None),
+            // All other states (StillAlive, Stopped, Continued, etc.) mean not exited yet
             _ => Ok(None),
         }
     }
@@ -144,7 +146,6 @@ pub fn spawn(cmd: &[String], rows: u16, cols: u16) -> Result<PtyProcess, PtyErro
             drop(slave);
 
             // Set master to non-blocking mode for async I/O
-            use nix::fcntl::{fcntl, FcntlArg, OFlag};
             let flags = fcntl(&master, FcntlArg::F_GETFL).map_err(PtyError::OpenPty)?;
             let mut flags = OFlag::from_bits_retain(flags);
             flags.insert(OFlag::O_NONBLOCK);

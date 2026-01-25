@@ -11,6 +11,7 @@ use std::path::PathBuf;
 /// - Single character - Literal character (e.g., `d` = 0x64)
 ///
 /// Returns None if the notation is invalid.
+#[must_use] 
 pub fn parse_key_notation(s: &str) -> Option<u8> {
     let s = s.trim().to_lowercase();
 

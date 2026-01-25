@@ -167,7 +167,7 @@ pub async fn run_attach(
         id: agent_id.to_string(),
         readonly: config.readonly,
     };
-    let mut json = serde_json::to_string(&request).unwrap();
+    let mut json = serde_json::to_string(&request).expect("Request serialization should never fail");
     json.push('\n');
     stream
         .write_all(json.as_bytes())

@@ -5,7 +5,7 @@ use super::transcript::Transcript;
 use crate::pty::PtyProcess;
 use std::time::Instant;
 
-/// Internal agent state (different from protocol::AgentState for internal tracking).
+/// Internal agent state (different from `protocol::AgentState` for internal tracking).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentState {
     Running,
@@ -29,13 +29,14 @@ pub struct Agent {
     /// Virtual screen.
     pub screen: Screen,
     /// Whether a client is currently attached to this agent.
-    /// When attached, the background pty_reader_task should skip this agent
+    /// When attached, the background `pty_reader_task` should skip this agent
     /// since the attach bridge handles I/O directly.
     pub attached: bool,
 }
 
 impl Agent {
     /// Create a new agent.
+    #[must_use]
     pub fn new(id: String, command: Vec<String>, pty: PtyProcess, rows: u16, cols: u16) -> Self {
         Self {
             id,
@@ -50,20 +51,25 @@ impl Agent {
     }
 
     /// Get the process ID.
+    #[must_use]
+    #[allow(clippy::cast_sign_loss)] // PIDs are always positive
+    #[allow(clippy::missing_const_for_fn)] // as_raw() isn't const
     pub fn pid(&self) -> u32 {
         self.pty.pid.as_raw() as u32
     }
 
     /// Check if the agent is still running.
-    pub fn is_running(&self) -> bool {
+    #[must_use]
+    pub const fn is_running(&self) -> bool {
         matches!(self.state, AgentState::Running)
     }
 
     /// Get the exit code if the agent has exited.
-    pub fn exit_code(&self) -> Option<i32> {
+    #[must_use]
+    pub const fn exit_code(&self) -> Option<i32> {
         match self.state {
             AgentState::Exited { code } => Some(code),
-            _ => None,
+            AgentState::Running => None,
         }
     }
 }
