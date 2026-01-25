@@ -178,19 +178,66 @@ async fn run_client(
         }
 
         Command::Tail { id, lines, follow } => {
-            let request = Request::Tail { id, lines, follow };
-            let response = client.request(request).await?;
+            if follow {
+                // Follow mode: continuously poll for new output
+                use std::time::Duration;
 
-            match response {
-                Response::Output { data } => {
-                    std::io::stdout().write_all(&data)?;
-                    std::io::stdout().flush()?;
+                let mut last_len = 0usize;
+                let poll_interval = Duration::from_millis(100);
+
+                loop {
+                    let response = client
+                        .request(Request::Tail {
+                            id: id.clone(),
+                            lines,
+                            follow: false, // Server doesn't implement follow
+                        })
+                        .await?;
+
+                    match response {
+                        Response::Output { data } => {
+                            // Only print new data
+                            if data.len() > last_len {
+                                let new_data = &data[last_len..];
+                                std::io::stdout().write_all(new_data)?;
+                                std::io::stdout().flush()?;
+                                last_len = data.len();
+                            }
+                        }
+                        Response::Error { message } => {
+                            // Agent may have exited
+                            if message.contains("not found") || message.contains("exited") {
+                                break;
+                            }
+                            return Err(message.into());
+                        }
+                        _ => {
+                            return Err("unexpected response".into());
+                        }
+                    }
+
+                    tokio::time::sleep(poll_interval).await;
                 }
-                Response::Error { message } => {
-                    return Err(message.into());
-                }
-                _ => {
-                    return Err("unexpected response".into());
+            } else {
+                // One-shot mode: just get current tail
+                let request = Request::Tail {
+                    id,
+                    lines,
+                    follow: false,
+                };
+                let response = client.request(request).await?;
+
+                match response {
+                    Response::Output { data } => {
+                        std::io::stdout().write_all(&data)?;
+                        std::io::stdout().flush()?;
+                    }
+                    Response::Error { message } => {
+                        return Err(message.into());
+                    }
+                    _ => {
+                        return Err("unexpected response".into());
+                    }
                 }
             }
         }
