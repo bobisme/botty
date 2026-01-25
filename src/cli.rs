@@ -11,7 +11,7 @@ use std::path::PathBuf;
 /// - Single character - Literal character (e.g., `d` = 0x64)
 ///
 /// Returns None if the notation is invalid.
-#[must_use] 
+#[must_use]
 pub fn parse_key_notation(s: &str) -> Option<u8> {
     let s = s.trim().to_lowercase();
 
@@ -77,6 +77,14 @@ pub enum Command {
         /// Custom agent ID (must be unique, defaults to generated name).
         #[arg(long, short)]
         name: Option<String>,
+
+        /// Environment variables (KEY=VALUE format, can be repeated).
+        #[arg(long, short, value_name = "KEY=VALUE")]
+        env: Vec<String>,
+
+        /// Clear environment before spawning (only set explicit --env vars).
+        #[arg(long)]
+        env_clear: bool,
 
         /// Command to run (after --).
         #[arg(last = true, required = true)]
@@ -245,6 +253,9 @@ pub enum Command {
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
+
+    /// Check system health and configuration.
+    Doctor,
 }
 
 #[cfg(test)]

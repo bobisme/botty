@@ -113,6 +113,15 @@ impl PtyProcess {
     }
 }
 
+/// Environment configuration for spawning.
+#[derive(Debug, Default)]
+pub struct SpawnEnv {
+    /// Environment variables to set (key, value pairs).
+    pub vars: Vec<(String, String)>,
+    /// If true, clear the environment before setting vars.
+    pub clear: bool,
+}
+
 /// Spawn a command in a new PTY.
 ///
 /// # Arguments
@@ -125,6 +134,27 @@ impl PtyProcess {
 ///
 /// A `PtyProcess` containing the master FD and child PID.
 pub fn spawn(cmd: &[String], rows: u16, cols: u16) -> Result<PtyProcess, PtyError> {
+    spawn_with_env(cmd, rows, cols, &SpawnEnv::default())
+}
+
+/// Spawn a command in a new PTY with custom environment.
+///
+/// # Arguments
+///
+/// * `cmd` - Command and arguments to execute
+/// * `rows` - Terminal height in rows
+/// * `cols` - Terminal width in columns
+/// * `env` - Environment configuration
+///
+/// # Returns
+///
+/// A `PtyProcess` containing the master FD and child PID.
+pub fn spawn_with_env(
+    cmd: &[String],
+    rows: u16,
+    cols: u16,
+    env: &SpawnEnv,
+) -> Result<PtyProcess, PtyError> {
     if cmd.is_empty() {
         return Err(PtyError::EmptyCommand);
     }
@@ -192,6 +222,22 @@ pub fn spawn(cmd: &[String], rows: u16, cols: u16) -> Result<PtyProcess, PtyErro
             // Close the original slave fd if it's not one of 0, 1, 2
             if slave_fd > 2 {
                 drop(slave);
+            }
+
+            // Set up environment
+            // SAFETY: We're in a forked child process before exec, so modifying
+            // environment is safe (no other threads exist in this process).
+            unsafe {
+                if env.clear {
+                    // Clear all environment variables
+                    for (key, _) in std::env::vars() {
+                        std::env::remove_var(&key);
+                    }
+                }
+                // Set requested environment variables
+                for (key, value) in &env.vars {
+                    std::env::set_var(key, value);
+                }
             }
 
             // Convert command to CStrings

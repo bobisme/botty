@@ -255,10 +255,24 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
     match request {
         Request::Ping => Response::Pong,
 
-        Request::Spawn { cmd, rows, cols, name } => {
+        Request::Spawn { cmd, rows, cols, name, env, env_clear } => {
             if cmd.is_empty() {
                 return Response::error("command is empty");
             }
+
+            // Parse environment variables
+            let env_vars: Vec<(String, String)> = env
+                .iter()
+                .filter_map(|s| {
+                    let mut parts = s.splitn(2, '=');
+                    match (parts.next(), parts.next()) {
+                        (Some(key), Some(value)) if !key.is_empty() => {
+                            Some((key.to_string(), value.to_string()))
+                        }
+                        _ => None, // Skip malformed entries
+                    }
+                })
+                .collect();
 
             // Validate and resolve agent ID
             let mut mgr = manager.lock().await;
@@ -277,7 +291,11 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
             };
             drop(mgr); // Release lock before spawning
 
-            match pty::spawn(&cmd, rows, cols) {
+            let spawn_env = pty::SpawnEnv {
+                vars: env_vars,
+                clear: env_clear,
+            };
+            match pty::spawn_with_env(&cmd, rows, cols, &spawn_env) {
                 Ok(pty_process) => {
                     let mut mgr = manager.lock().await;
                     // Double-check uniqueness (in case of race)

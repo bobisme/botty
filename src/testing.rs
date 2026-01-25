@@ -100,6 +100,8 @@ impl TestHarness {
             rows,
             cols,
             name: None,
+            env: vec![],
+            env_clear: false,
         };
 
         let response = self

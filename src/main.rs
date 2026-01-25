@@ -25,6 +25,7 @@ async fn main() {
 
     let result = match cli.command {
         Command::Server { daemon } => run_server(socket_path, daemon).await,
+        Command::Doctor => run_doctor(socket_path).await,
         cmd => run_client(socket_path, cmd).await,
     };
 
@@ -49,6 +50,124 @@ async fn run_server(
     Ok(())
 }
 
+async fn run_doctor(
+    socket_path: std::path::PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let mut all_ok = true;
+
+    // 1. Check socket path
+    print!("Socket path: {} ", socket_path.display());
+    let socket_dir = socket_path.parent().unwrap_or_else(|| std::path::Path::new("/tmp"));
+    if socket_dir.exists() {
+        if socket_dir.metadata()?.permissions().readonly() {
+            println!("[FAIL] directory not writable");
+            all_ok = false;
+        } else {
+            println!("[OK]");
+        }
+    } else {
+        println!("[FAIL] directory does not exist");
+        all_ok = false;
+    }
+
+    // 2. Check for stale socket
+    print!("Stale socket check: ");
+    if socket_path.exists() {
+        let metadata = std::fs::metadata(&socket_path)?;
+        if metadata.file_type().is_socket() {
+            // Try to connect to see if daemon is running
+            match tokio::net::UnixStream::connect(&socket_path).await {
+                Ok(_) => println!("[OK] daemon responding"),
+                Err(_) => {
+                    println!("[WARN] socket exists but daemon not responding (stale?)");
+                }
+            }
+        } else {
+            println!("[FAIL] path exists but is not a socket");
+            all_ok = false;
+        }
+    } else {
+        println!("[OK] no stale socket");
+    }
+
+    // 3. Check PTY allocation
+    print!("PTY allocation: ");
+    match botty::pty::spawn(&["true".to_string()], 24, 80) {
+        Ok(pty) => {
+            // Wait for it to complete
+            let _ = pty.wait();
+            println!("[OK]");
+        }
+        Err(e) => {
+            println!("[FAIL] {e}");
+            all_ok = false;
+        }
+    }
+
+    // 4. Check daemon connectivity (start if needed)
+    print!("Daemon connection: ");
+    let mut client = Client::new(socket_path.clone());
+    match client.request(Request::Ping).await {
+        Ok(Response::Pong) => println!("[OK]"),
+        Ok(other) => {
+            println!("[FAIL] unexpected response: {other:?}");
+            all_ok = false;
+        }
+        Err(e) => {
+            println!("[FAIL] {e}");
+            all_ok = false;
+        }
+    }
+
+    // 5. Test spawn/kill cycle
+    print!("Spawn/kill cycle: ");
+    match client
+        .request(Request::Spawn {
+            cmd: vec!["sleep".to_string(), "60".to_string()],
+            rows: 24,
+            cols: 80,
+            name: Some("__doctor_test__".to_string()),
+            env: vec![],
+            env_clear: false,
+        })
+        .await
+    {
+        Ok(Response::Spawned { id, .. }) => {
+            // Kill it
+            match client.request(Request::Kill { id: id.clone(), signal: 9 }).await {
+                Ok(Response::Ok) => println!("[OK]"),
+                Ok(other) => {
+                    println!("[FAIL] kill returned: {other:?}");
+                    all_ok = false;
+                }
+                Err(e) => {
+                    println!("[FAIL] kill failed: {e}");
+                    all_ok = false;
+                }
+            }
+        }
+        Ok(other) => {
+            println!("[FAIL] spawn returned: {other:?}");
+            all_ok = false;
+        }
+        Err(e) => {
+            println!("[FAIL] spawn failed: {e}");
+            all_ok = false;
+        }
+    }
+
+    // Summary
+    println!();
+    if all_ok {
+        println!("All checks passed!");
+        Ok(())
+    } else {
+        Err("Some checks failed".into())
+    }
+}
+
 #[allow(clippy::too_many_lines)] // Command dispatch function, splitting would reduce clarity
 async fn run_client(
     socket_path: std::path::PathBuf,
@@ -62,8 +181,8 @@ async fn run_client(
     let mut client = Client::new(socket_path);
 
     match command {
-        Command::Spawn { rows, cols, name, cmd } => {
-            let request = Request::Spawn { cmd, rows, cols, name };
+        Command::Spawn { rows, cols, name, env, env_clear, cmd } => {
+            let request = Request::Spawn { cmd, rows, cols, name, env, env_clear };
             let response = client.request(request).await?;
 
             match response {
@@ -337,7 +456,7 @@ async fn run_client(
         }
 
         // These commands are handled before this match
-        Command::Attach { .. } | Command::Server { .. } => {
+        Command::Attach { .. } | Command::Server { .. } | Command::Doctor => {
             unreachable!("handled above")
         }
 
@@ -442,6 +561,8 @@ async fn run_client(
                 rows,
                 cols,
                 name: None,
+                env: vec![],
+                env_clear: false,
             };
             let response = client.request(request).await?;
 

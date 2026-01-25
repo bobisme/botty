@@ -81,6 +81,8 @@ async fn test_spawn_and_list() {
             rows: 24,
             cols: 80,
             name: None,
+            env: vec![],
+            env_clear: false,
         })
         .await
         .expect("spawn failed");
@@ -144,6 +146,8 @@ async fn test_spawn_send_snapshot() {
             rows: 24,
             cols: 80,
             name: None,
+            env: vec![],
+            env_clear: false,
         })
         .await
         .expect("spawn failed");
@@ -267,6 +271,8 @@ async fn test_screen_cursor_movement() {
             rows: 24,
             cols: 80,
             name: None,
+            env: vec![],
+            env_clear: false,
         })
         .await
         .expect("spawn failed");
@@ -337,6 +343,8 @@ async fn test_transcript_tail() {
             rows: 24,
             cols: 80,
             name: None,
+            env: vec![],
+            env_clear: false,
         })
         .await
         .expect("spawn failed");
@@ -405,6 +413,8 @@ async fn test_attach_and_detach() {
             rows: 24,
             cols: 80,
             name: None,
+            env: vec![],
+            env_clear: false,
         })
         .await
         .expect("spawn failed");
@@ -494,6 +504,8 @@ async fn test_attach_readonly_mode() {
             rows: 24,
             cols: 80,
             name: None,
+            env: vec![],
+            env_clear: false,
         })
         .await
         .expect("spawn failed");
@@ -611,6 +623,8 @@ async fn test_attach_receives_output() {
             rows: 24,
             cols: 80,
             name: None,
+            env: vec![],
+            env_clear: false,
         })
         .await
         .expect("spawn failed");
@@ -704,6 +718,8 @@ async fn test_attach_agent_exit() {
             rows: 24,
             cols: 80,
             name: None,
+            env: vec![],
+            env_clear: false,
         })
         .await
         .expect("spawn failed");

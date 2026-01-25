@@ -17,7 +17,6 @@ pub enum DumpFormat {
     Jsonl,
 }
 
-
 /// Requests from client to server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -35,6 +34,12 @@ pub enum Request {
         /// Optional custom agent ID (must be unique).
         #[serde(default)]
         name: Option<String>,
+        /// Environment variables to set (KEY=VALUE pairs).
+        #[serde(default)]
+        env: Vec<String>,
+        /// Clear environment before spawning.
+        #[serde(default)]
+        env_clear: bool,
     },
 
     /// List all agents.
@@ -314,6 +319,8 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 name: None,
+                env: vec![],
+                env_clear: false,
             },
             Request::List,
             Request::Kill {
