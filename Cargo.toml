@@ -11,6 +11,7 @@ hex = "0.4.3"
 libc = "0.2.180"
 names = { version = "0.14.0", default-features = false }
 nix = { version = "0.31.1", features = ["term", "signal", "process", "fs"] }
+regex = "1.12.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 thiserror = "2.0.18"
@@ -36,4 +37,5 @@ style = { level = "warn", priority = -2 }
 
 [dev-dependencies]
 assert_cmd = "2.1.2"
+futures = "0.3.31"
 predicates = "3.1.3"

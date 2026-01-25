@@ -9,9 +9,11 @@ pub mod client;
 pub mod protocol;
 pub mod pty;
 pub mod server;
+pub mod testing;
 
 pub use attach::{run_attach, AttachConfig, AttachError};
 pub use cli::{parse_key_notation, Cli, Command};
 pub use client::{default_socket_path, Client, ClientError};
 pub use protocol::{AgentInfo, AgentState, DumpFormat, Request, Response};
 pub use server::{Server, ServerError};
+pub use testing::{AgentHandle, TestError, TestHarness};
