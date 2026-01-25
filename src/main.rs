@@ -237,6 +237,7 @@ async fn run_client(
                                         botty::AgentState::Exited => "exited",
                                     },
                                     "command": a.command.join(" "),
+                                    "size": { "rows": a.size.0, "cols": a.size.1 },
                                     "exit_code": a.exit_code,
                                 })
                             })
@@ -384,6 +385,10 @@ async fn run_client(
                             // Clear screen and move cursor home for clean TUI display
                             print!("\x1b[2J\x1b[H");
                             print!("{content}");
+                            // Ensure we end on a newline so streaming output starts fresh
+                            if !content.ends_with('\n') {
+                                println!();
+                            }
                             std::io::stdout().flush()?;
                         }
                         Response::Error { message } => {
@@ -511,6 +516,22 @@ async fn run_client(
         // These commands are handled before this match
         Command::Attach { .. } | Command::Server { .. } | Command::Doctor | Command::Events { .. } | Command::View { .. } => {
             unreachable!("handled above")
+        }
+
+        Command::Resize { id, rows, cols } => {
+            let response = client.request(Request::Resize { id, rows, cols }).await?;
+
+            match response {
+                Response::Ok => {
+                    println!("Resized to {rows}x{cols}");
+                }
+                Response::Error { message } => {
+                    return Err(message.into());
+                }
+                _ => {
+                    return Err("unexpected response".into());
+                }
+            }
         }
 
         Command::Wait {
@@ -917,10 +938,12 @@ async fn run_view_command(
         _ => return Err("unexpected response to list".into()),
     };
 
-    // Create or reuse tmux session
-    if !view.session_exists() {
-        view.create_session()?;
+    // Kill any existing session and create fresh
+    // (old sessions may have stale panes from killed agents)
+    if view.session_exists() {
+        view.kill_session()?;
     }
+    view.create_session()?;
 
     // Create panes for existing agents
     for agent_id in &current_agents {

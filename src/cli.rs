@@ -279,6 +279,20 @@ pub enum Command {
         #[arg(long, default_value = "tmux")]
         mux: String,
     },
+
+    /// Resize an agent's terminal.
+    Resize {
+        /// Agent ID.
+        id: String,
+
+        /// New number of rows.
+        #[arg(long)]
+        rows: u16,
+
+        /// New number of columns.
+        #[arg(long)]
+        cols: u16,
+    },
 }
 
 #[cfg(test)]

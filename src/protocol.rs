@@ -133,6 +133,16 @@ pub enum Request {
         #[serde(default)]
         include_output: bool,
     },
+
+    /// Resize an agent's terminal.
+    Resize {
+        /// Agent ID.
+        id: String,
+        /// New terminal rows.
+        rows: u16,
+        /// New terminal columns.
+        cols: u16,
+    },
 }
 
 /// Information about a single agent.
@@ -396,6 +406,11 @@ mod tests {
             Request::Events {
                 filter: vec!["agent-1".into()],
                 include_output: true,
+            },
+            Request::Resize {
+                id: "test-agent".into(),
+                rows: 40,
+                cols: 120,
             },
         ];
 

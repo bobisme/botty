@@ -534,6 +534,22 @@ async fn handle_request(
             Response::error("events request should not reach handle_request")
         }
 
+        Request::Resize { id, rows, cols } => {
+            let mut mgr = manager.lock().await;
+            if let Some(agent) = mgr.get_mut(&id) {
+                // Resize the PTY
+                if let Err(e) = agent.pty.resize(rows, cols) {
+                    return Response::error(format!("resize failed: {e}"));
+                }
+                // Update the screen model
+                agent.screen.resize(rows, cols);
+                info!(%id, %rows, %cols, "Resized agent");
+                Response::Ok
+            } else {
+                Response::error(format!("agent not found: {id}"))
+            }
+        }
+
         Request::Shutdown => {
             info!("Shutdown requested");
             // TODO: Actually trigger shutdown
