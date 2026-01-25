@@ -28,6 +28,10 @@ pub struct Agent {
     pub transcript: Transcript,
     /// Virtual screen.
     pub screen: Screen,
+    /// Whether a client is currently attached to this agent.
+    /// When attached, the background pty_reader_task should skip this agent
+    /// since the attach bridge handles I/O directly.
+    pub attached: bool,
 }
 
 impl Agent {
@@ -41,6 +45,7 @@ impl Agent {
             started_at: Instant::now(),
             transcript: Transcript::new(1024 * 1024), // 1MB default
             screen: Screen::new(rows, cols),
+            attached: false,
         }
     }
 

@@ -419,10 +419,10 @@ async fn handle_attach(
     mut writer: OwnedWriteHalf,
     manager: &Arc<Mutex<AgentManager>>,
 ) -> Result<(), ServerError> {
-    // Check if agent exists and get initial info
+    // Check if agent exists, get initial info, and mark as attached
     let (pty_fd, size) = {
-        let mgr = manager.lock().await;
-        match mgr.get(&agent_id) {
+        let mut mgr = manager.lock().await;
+        match mgr.get_mut(&agent_id) {
             Some(agent) => {
                 if !agent.is_running() {
                     let response = Response::error(format!("agent {} has exited", agent_id));
@@ -431,6 +431,8 @@ async fn handle_attach(
                     writer.write_all(json.as_bytes()).await.ok();
                     return Ok(());
                 }
+                // Mark agent as attached so pty_reader_task skips it
+                agent.attached = true;
                 (agent.pty.master_fd(), agent.screen.size())
             }
             None => {
@@ -467,6 +469,14 @@ async fn handle_attach(
         manager,
     )
     .await;
+
+    // Clear attached flag
+    {
+        let mut mgr = manager.lock().await;
+        if let Some(agent) = mgr.get_mut(&agent_id) {
+            agent.attached = false;
+        }
+    }
 
     // Send AttachEnded response
     let end_reason = match &result {
@@ -600,7 +610,9 @@ async fn pty_reader_task(manager: Arc<Mutex<AgentManager>>) {
 
         for id in ids {
             if let Some(agent) = mgr.get_mut(&id) {
-                if !agent.is_running() {
+                // Skip agents that aren't running or are currently attached
+                // (attached agents have their I/O handled by run_attach_bridge)
+                if !agent.is_running() || agent.attached {
                     continue;
                 }
 
