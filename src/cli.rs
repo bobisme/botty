@@ -210,6 +210,32 @@ pub enum Command {
         #[arg(long, short)]
         print: bool,
     },
+
+    /// Execute a command and return its output.
+    ///
+    /// Spawns a shell, runs the command, waits for completion, and returns
+    /// the output. The agent is automatically killed after completion.
+    Exec {
+        /// Terminal rows.
+        #[arg(long, default_value = "24")]
+        rows: u16,
+
+        /// Terminal columns.
+        #[arg(long, default_value = "80")]
+        cols: u16,
+
+        /// Timeout in seconds.
+        #[arg(long, short, default_value = "30")]
+        timeout: u64,
+
+        /// Shell to use.
+        #[arg(long, default_value = "sh")]
+        shell: String,
+
+        /// Command to execute.
+        #[arg(last = true, required = true)]
+        cmd: Vec<String>,
+    },
 }
 
 #[cfg(test)]

@@ -432,3 +432,37 @@ fn test_spawn_duplicate_name_fails() {
         .assert()
         .success();
 }
+
+#[test]
+fn test_exec_command() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    // Execute a simple command
+    env.botty()
+        .args(["exec", "--timeout", "5", "--", "echo", "EXEC_TEST_OUTPUT"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("EXEC_TEST_OUTPUT"));
+}
+
+#[test]
+fn test_exec_multiline_output() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    // Execute a command with multiple lines of output
+    env.botty()
+        .args([
+            "exec",
+            "--timeout",
+            "5",
+            "--",
+            "echo first; echo second; echo third",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("first"))
+        .stdout(predicate::str::contains("second"))
+        .stdout(predicate::str::contains("third"));
+}

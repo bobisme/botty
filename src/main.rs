@@ -339,6 +339,132 @@ async fn run_client(
         Command::Server { .. } => {
             unreachable!("handled above")
         }
+
+        Command::Exec {
+            rows,
+            cols,
+            timeout,
+            shell,
+            cmd,
+        } => {
+            use std::time::{Duration, Instant};
+
+            // Build the command string
+            let cmd_str = cmd.join(" ");
+
+            // Spawn a shell
+            let request = Request::Spawn {
+                cmd: vec![shell.clone()],
+                rows,
+                cols,
+                name: None,
+            };
+            let response = client.request(request).await?;
+
+            let agent_id = match response {
+                Response::Spawned { id, .. } => id,
+                Response::Error { message } => return Err(message.into()),
+                _ => return Err("unexpected response".into()),
+            };
+
+            // Give shell time to start
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Send the command with a unique marker for detecting completion
+            let marker = format!("__BOTTY_DONE_{}__", std::process::id());
+            let full_cmd = format!("{cmd_str}; echo {marker}\n");
+
+            let send_response = client
+                .request(Request::Send {
+                    id: agent_id.clone(),
+                    data: full_cmd,
+                    newline: false, // Already has newline
+                })
+                .await?;
+
+            if let Response::Error { message } = send_response {
+                // Kill the agent before returning error
+                let _ = client
+                    .request(Request::Kill {
+                        id: agent_id,
+                        signal: 9,
+                    })
+                    .await;
+                return Err(message.into());
+            }
+
+            // Wait for the marker to appear
+            let timeout_duration = Duration::from_secs(timeout);
+            let poll_interval = Duration::from_millis(50);
+            let deadline = Instant::now() + timeout_duration;
+
+            let mut output = String::new();
+            loop {
+                if Instant::now() >= deadline {
+                    // Kill the agent and return timeout error
+                    let _ = client
+                        .request(Request::Kill {
+                            id: agent_id,
+                            signal: 9,
+                        })
+                        .await;
+                    return Err("timeout waiting for command completion".into());
+                }
+
+                let response = client
+                    .request(Request::Snapshot {
+                        id: agent_id.clone(),
+                        strip_colors: true,
+                    })
+                    .await?;
+
+                let snapshot = match response {
+                    Response::Snapshot { content, .. } => content,
+                    Response::Error { message } => {
+                        // Agent may have exited
+                        return Err(message.into());
+                    }
+                    _ => return Err("unexpected response".into()),
+                };
+
+                // Look for marker at the start of a line (not in command echo)
+                let marker_line = format!("\n{marker}");
+                if snapshot.contains(&marker_line) {
+                    // Extract output between the command echo and the marker
+                    if let Some(marker_pos) = snapshot.find(&marker_line) {
+                        // Get everything before the marker line
+                        let before_marker = &snapshot[..marker_pos];
+                        let lines: Vec<&str> = before_marker.lines().collect();
+
+                        // Skip the first line (command echo), take the rest as output
+                        if lines.len() > 1 {
+                            let output_lines: Vec<&str> = lines
+                                .iter()
+                                .skip(1) // Skip command echo
+                                .copied()
+                                .collect();
+                            output = output_lines.join("\n");
+                        }
+                    }
+                    break;
+                }
+
+                tokio::time::sleep(poll_interval).await;
+            }
+
+            // Kill the agent
+            let _ = client
+                .request(Request::Kill {
+                    id: agent_id,
+                    signal: 9,
+                })
+                .await;
+
+            // Print the output
+            if !output.is_empty() {
+                println!("{output}");
+            }
+        }
     }
 
     Ok(())
