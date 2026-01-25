@@ -315,9 +315,13 @@ async fn handle_request(
                 if custom_name.is_empty() {
                     return Response::error("agent name cannot be empty");
                 }
-                // Check for uniqueness
-                if mgr.get(&custom_name).is_some() {
-                    return Response::error(format!("agent name already in use: {custom_name}"));
+                // Check for uniqueness - allow reusing names of exited agents
+                if let Some(existing) = mgr.get(&custom_name) {
+                    if existing.is_running() {
+                        return Response::error(format!("agent name already in use: {custom_name}"));
+                    }
+                    // Remove the exited agent to reuse the name
+                    mgr.remove(&custom_name);
                 }
                 custom_name
             } else {
@@ -332,9 +336,12 @@ async fn handle_request(
             match pty::spawn_with_env(&cmd, rows, cols, &spawn_env) {
                 Ok(pty_process) => {
                     let mut mgr = manager.lock().await;
-                    // Double-check uniqueness (in case of race)
-                    if mgr.get(&id).is_some() {
-                        return Response::error(format!("agent name already in use: {id}"));
+                    // Double-check uniqueness (in case of race) - only block if running
+                    if let Some(existing) = mgr.get(&id) {
+                        if existing.is_running() {
+                            return Response::error(format!("agent name already in use: {id}"));
+                        }
+                        mgr.remove(&id);
                     }
                     let pid = pty_process.pid.as_raw() as u32;
                     let agent = Agent::new(id.clone(), cmd.clone(), pty_process, rows, cols);
