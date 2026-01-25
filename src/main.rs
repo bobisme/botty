@@ -79,7 +79,7 @@ async fn run_client(
             }
         }
 
-        Command::List { all } => {
+        Command::List { all, json } => {
             let response = client.request(Request::List).await?;
 
             match response {
@@ -88,27 +88,55 @@ async fn run_client(
                     let agents: Vec<_> = if all {
                         agents
                     } else {
-                        agents.into_iter()
+                        agents
+                            .into_iter()
                             .filter(|a| matches!(a.state, botty::AgentState::Running))
                             .collect()
                     };
 
-                    if agents.is_empty() {
+                    if json {
+                        // JSON output for piping to jq
+                        let json_agents: Vec<_> = agents
+                            .iter()
+                            .map(|a| {
+                                serde_json::json!({
+                                    "id": a.id,
+                                    "pid": a.pid,
+                                    "state": match a.state {
+                                        botty::AgentState::Running => "running",
+                                        botty::AgentState::Exited => "exited",
+                                    },
+                                    "command": a.command.join(" "),
+                                    "exit_code": a.exit_code,
+                                })
+                            })
+                            .collect();
+                        println!("{}", serde_json::to_string(&json_agents)?);
+                    } else if agents.is_empty() {
+                        // Human-readable empty message
                         if all {
-                            println!("No agents");
+                            println!("(no agents)");
                         } else {
-                            println!("No running agents");
+                            println!("(no agents currently active)");
                         }
                     } else {
-                        println!("{:<20} {:>8} {:>10} {}", "ID", "PID", "STATE", "COMMAND");
-                        for agent in agents {
-                            let state = match agent.state {
-                                botty::AgentState::Running => "running",
-                                botty::AgentState::Exited => "exited",
-                            };
-                            let cmd = agent.command.join(" ");
-                            println!("{:<20} {:>8} {:>10} {}", agent.id, agent.pid, state, cmd);
-                        }
+                        // Default: TOON format (token-efficient for LLMs)
+                        let json_data = serde_json::json!({
+                            "agents": agents.iter().map(|a| {
+                                serde_json::json!({
+                                    "id": a.id,
+                                    "pid": a.pid,
+                                    "state": match a.state {
+                                        botty::AgentState::Running => "running",
+                                        botty::AgentState::Exited => "exited",
+                                    },
+                                    "command": a.command.join(" "),
+                                })
+                            }).collect::<Vec<_>>()
+                        });
+                        let toon = toon_format::encode(&json_data, &toon_format::EncodeOptions::default())
+                            .unwrap_or_else(|_| format!("{:?}", json_data));
+                        println!("{toon}");
                     }
                 }
                 Response::Error { message } => {

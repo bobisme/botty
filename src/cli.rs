@@ -87,6 +87,10 @@ pub enum Command {
         /// Show all agents including exited ones.
         #[arg(long)]
         all: bool,
+
+        /// Output in JSON format (for piping to jq).
+        #[arg(long)]
+        json: bool,
     },
 
     /// Kill an agent.
