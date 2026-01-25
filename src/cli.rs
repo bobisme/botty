@@ -78,8 +78,12 @@ pub enum Command {
         cmd: Vec<String>,
     },
 
-    /// List all agents.
-    List,
+    /// List agents.
+    List {
+        /// Show all agents including exited ones.
+        #[arg(long)]
+        all: bool,
+    },
 
     /// Kill an agent.
     Kill {
@@ -176,6 +180,32 @@ pub enum Command {
 
     /// Shut down the server.
     Shutdown,
+
+    /// Wait for agent output to match a condition.
+    Wait {
+        /// Agent ID.
+        id: String,
+
+        /// Wait until output contains this string.
+        #[arg(long, group = "condition")]
+        contains: Option<String>,
+
+        /// Wait until output matches this regex pattern.
+        #[arg(long, group = "condition")]
+        pattern: Option<String>,
+
+        /// Wait until screen is stable (hasn't changed for this duration).
+        #[arg(long, group = "condition", value_name = "MILLIS")]
+        stable: Option<u64>,
+
+        /// Timeout in seconds.
+        #[arg(long, short, default_value = "30")]
+        timeout: u64,
+
+        /// Print the snapshot when condition is met.
+        #[arg(long, short)]
+        print: bool,
+    },
 }
 
 #[cfg(test)]

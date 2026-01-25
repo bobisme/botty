@@ -79,13 +79,26 @@ async fn run_client(
             }
         }
 
-        Command::List => {
+        Command::List { all } => {
             let response = client.request(Request::List).await?;
 
             match response {
                 Response::Agents { agents } => {
+                    // Filter to running only unless --all is specified
+                    let agents: Vec<_> = if all {
+                        agents
+                    } else {
+                        agents.into_iter()
+                            .filter(|a| matches!(a.state, botty::AgentState::Running))
+                            .collect()
+                    };
+
                     if agents.is_empty() {
-                        println!("No agents running");
+                        if all {
+                            println!("No agents");
+                        } else {
+                            println!("No running agents");
+                        }
                     } else {
                         println!("{:<20} {:>8} {:>10} {}", "ID", "PID", "STATE", "COMMAND");
                         for agent in agents {
@@ -238,6 +251,73 @@ async fn run_client(
 
         Command::Attach { .. } => {
             unreachable!("handled above")
+        }
+
+        Command::Wait {
+            id,
+            contains,
+            pattern,
+            stable,
+            timeout,
+            print,
+        } => {
+            use regex::Regex;
+            use std::time::{Duration, Instant};
+
+            let timeout_duration = Duration::from_secs(timeout);
+            let poll_interval = Duration::from_millis(50);
+            let deadline = Instant::now() + timeout_duration;
+
+            let mut last_snapshot = String::new();
+            let mut stable_since = Instant::now();
+
+            loop {
+                if Instant::now() >= deadline {
+                    return Err("timeout waiting for condition".into());
+                }
+
+                let response = client
+                    .request(Request::Snapshot {
+                        id: id.clone(),
+                        strip_colors: true,
+                    })
+                    .await?;
+
+                let snapshot = match response {
+                    Response::Snapshot { content, .. } => content,
+                    Response::Error { message } => return Err(message.into()),
+                    _ => return Err("unexpected response".into()),
+                };
+
+                // Check conditions
+                let condition_met = if let Some(ref needle) = contains {
+                    snapshot.contains(needle)
+                } else if let Some(ref pat) = pattern {
+                    let re = Regex::new(pat).map_err(|e| format!("invalid regex: {e}"))?;
+                    re.is_match(&snapshot)
+                } else if let Some(stable_ms) = stable {
+                    let stable_duration = Duration::from_millis(stable_ms);
+                    if snapshot == last_snapshot {
+                        stable_since.elapsed() >= stable_duration
+                    } else {
+                        stable_since = Instant::now();
+                        false
+                    }
+                } else {
+                    // No condition specified - just wait for any output change
+                    !snapshot.is_empty() && snapshot != last_snapshot
+                };
+
+                if condition_met {
+                    if print {
+                        println!("{snapshot}");
+                    }
+                    break;
+                }
+
+                last_snapshot = snapshot;
+                tokio::time::sleep(poll_interval).await;
+            }
         }
 
         Command::Shutdown => {

@@ -142,10 +142,10 @@ fn test_spawn_list_kill_workflow() {
         .success()
         .stdout(predicate::str::contains("Signal sent"));
 
-    // List should show exited
+    // List should show exited (need --all to see exited agents)
     std::thread::sleep(Duration::from_millis(200));
     env.botty()
-        .arg("list")
+        .args(["list", "--all"])
         .assert()
         .success()
         .stdout(predicate::str::contains("exited"));
@@ -294,4 +294,83 @@ fn test_shutdown() {
 
     // Mark server as None so Drop doesn't try to shut it down again
     env.server_process = None;
+}
+
+#[test]
+fn test_wait_for_content() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    // Spawn a program that outputs text after a delay
+    let output = env
+        .botty()
+        .args([
+            "spawn",
+            "--",
+            "sh",
+            "-c",
+            "sleep 0.2; echo MARKER_READY; sleep 30",
+        ])
+        .output()
+        .expect("failed to run spawn");
+
+    assert!(output.status.success());
+    let agent_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Wait should succeed when the content appears
+    env.botty()
+        .args([
+            "wait",
+            &agent_id,
+            "--contains",
+            "MARKER_READY",
+            "--timeout",
+            "5",
+            "--print",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MARKER_READY"));
+
+    // Clean up
+    env.botty()
+        .args(["kill", "-9", &agent_id])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_wait_timeout() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    // Spawn a program that never outputs the expected content
+    let output = env
+        .botty()
+        .args(["spawn", "--", "sleep", "30"])
+        .output()
+        .expect("failed to run spawn");
+
+    assert!(output.status.success());
+    let agent_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Wait should fail after timeout
+    env.botty()
+        .args([
+            "wait",
+            &agent_id,
+            "--contains",
+            "NEVER_APPEARS",
+            "--timeout",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("timeout"));
+
+    // Clean up
+    env.botty()
+        .args(["kill", "-9", &agent_id])
+        .assert()
+        .success();
 }
