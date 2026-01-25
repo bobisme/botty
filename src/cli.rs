@@ -150,6 +150,11 @@ pub enum Command {
         /// Show raw output including ANSI escape codes.
         #[arg(long)]
         raw: bool,
+
+        /// Show current screen state before streaming (for TUI viewing).
+        /// Implies --follow and --raw.
+        #[arg(long)]
+        replay: bool,
     },
 
     /// Dump agent transcript.
