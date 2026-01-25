@@ -41,13 +41,13 @@ pub enum AttachError {
 enum DetachState {
     /// Normal state - no prefix seen.
     Normal,
-    /// Saw Ctrl+A (0x01), waiting for 'd'.
+    /// Saw Ctrl+G (0x07), waiting for 'd'.
     SawPrefix,
 }
 
 /// Configuration for attach mode.
 pub struct AttachConfig {
-    /// Prefix key for detach (default: Ctrl+A = 0x01).
+    /// Prefix key for detach (default: Ctrl+G = 0x07).
     pub detach_prefix: u8,
     /// Key after prefix to detach (default: 'd' = 0x64).
     pub detach_key: u8,
@@ -58,7 +58,7 @@ pub struct AttachConfig {
 impl Default for AttachConfig {
     fn default() -> Self {
         Self {
-            detach_prefix: 0x01, // Ctrl+A
+            detach_prefix: 0x07, // Ctrl+G
             detach_key: b'd',
             readonly: false,
         }
@@ -210,7 +210,7 @@ pub async fn run_attach(
 
     // Enter raw mode
     let _terminal_state = TerminalState::enter_raw_mode()?;
-    info!("Entered raw mode. Press Ctrl+A then 'd' to detach.");
+    info!("Entered raw mode. Press Ctrl+G then 'd' to detach.");
 
     // Run the I/O bridge
     let result = run_io_bridge(stream, &config).await;
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn test_attach_config_default() {
         let config = AttachConfig::default();
-        assert_eq!(config.detach_prefix, 0x01); // Ctrl+A
+        assert_eq!(config.detach_prefix, 0x07); // Ctrl+G
         assert_eq!(config.detach_key, b'd');
         assert!(!config.readonly);
     }
