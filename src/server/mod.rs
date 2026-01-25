@@ -18,6 +18,8 @@ use crate::protocol::{
 };
 use crate::pty;
 use nix::sys::signal::Signal;
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 use std::os::fd::BorrowedFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -68,9 +70,23 @@ impl Server {
 
     /// Run the server event loop.
     pub async fn run(&mut self) -> Result<(), ServerError> {
-        // Remove existing socket if present
+        // Security: Check for symlink attack before removing existing socket
         if self.socket_path.exists() {
-            std::fs::remove_file(&self.socket_path).ok();
+            // Don't follow symlinks - check if it's actually a symlink
+            let metadata = std::fs::symlink_metadata(&self.socket_path)
+                .map_err(ServerError::Io)?;
+            
+            if metadata.file_type().is_symlink() {
+                return Err(ServerError::Bind(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "socket path is a symlink - possible security attack",
+                )));
+            }
+            
+            // Only remove if it's a socket (or we can't tell)
+            if metadata.file_type().is_socket() || metadata.file_type().is_file() {
+                std::fs::remove_file(&self.socket_path).ok();
+            }
         }
 
         // Ensure parent directory exists
@@ -79,6 +95,15 @@ impl Server {
         }
 
         let listener = UnixListener::bind(&self.socket_path).map_err(ServerError::Bind)?;
+        
+        // Security: Set socket permissions to owner-only (0o700)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&self.socket_path, perms).map_err(ServerError::Io)?;
+        }
+        
         info!("Server listening on {:?}", self.socket_path);
 
         // Start the PTY output reader task
@@ -265,6 +290,12 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
         }
 
         Request::Kill { id, signal } => {
+            // Validate signal number - only allow standard signals (1-31)
+            // Real-time signals (32-64) and invalid numbers are rejected
+            if signal < 1 || signal > 31 {
+                return Response::error(format!("invalid signal number: {signal} (must be 1-31)"));
+            }
+            
             let mgr = manager.lock().await;
             if let Some(agent) = mgr.get(&id) {
                 let sig = Signal::try_from(signal).unwrap_or(Signal::SIGTERM);
@@ -273,10 +304,10 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
                         info!(%id, ?sig, "Sent signal to agent");
                         Response::Ok
                     }
-                    Err(e) => Response::error(format!("failed to send signal: {}", e)),
+                    Err(e) => Response::error(format!("failed to send signal: {e}")),
                 }
             } else {
-                Response::error(format!("agent not found: {}", id))
+                Response::error(format!("agent not found: {id}"))
             }
         }
 
@@ -420,12 +451,12 @@ async fn handle_attach(
     manager: &Arc<Mutex<AgentManager>>,
 ) -> Result<(), ServerError> {
     // Check if agent exists, get initial info, and mark as attached
-    let (pty_fd, size) = {
+    let size = {
         let mut mgr = manager.lock().await;
         match mgr.get_mut(&agent_id) {
             Some(agent) => {
                 if !agent.is_running() {
-                    let response = Response::error(format!("agent {} has exited", agent_id));
+                    let response = Response::error(format!("agent {agent_id} has exited"));
                     let mut json = serde_json::to_string(&response).unwrap();
                     json.push('\n');
                     writer.write_all(json.as_bytes()).await.ok();
@@ -433,10 +464,10 @@ async fn handle_attach(
                 }
                 // Mark agent as attached so pty_reader_task skips it
                 agent.attached = true;
-                (agent.pty.master_fd(), agent.screen.size())
+                agent.screen.size()
             }
             None => {
-                let response = Response::error(format!("agent not found: {}", agent_id));
+                let response = Response::error(format!("agent not found: {agent_id}"));
                 let mut json = serde_json::to_string(&response).unwrap();
                 json.push('\n');
                 writer.write_all(json.as_bytes()).await.ok();
@@ -457,12 +488,11 @@ async fn handle_attach(
         .await
         .map_err(ServerError::Io)?;
 
-    info!("Attach started for agent {}", agent_id);
+    info!("Attach started for agent {agent_id}");
 
     // Run the I/O bridge
     let result = run_attach_bridge(
         &agent_id,
-        pty_fd,
         readonly,
         &mut reader,
         &mut writer,
@@ -497,9 +527,13 @@ async fn handle_attach(
 }
 
 /// Run the attach mode I/O bridge.
+///
+/// Note on FD safety: We don't pass pty_fd as a parameter anymore. Instead, we
+/// always get the fd from the agent while holding the manager lock. This ensures
+/// the fd is valid because the Agent (and its PtyProcess) cannot be dropped while
+/// we hold the lock.
 async fn run_attach_bridge(
     agent_id: &str,
-    pty_fd: i32,
     readonly: bool,
     reader: &mut OwnedReadHalf,
     writer: &mut OwnedWriteHalf,
@@ -522,13 +556,22 @@ async fn run_attach_bridge(
                         return Ok(AttachEndReason::Detached);
                     }
                     Ok(n) => {
-                        // Write to PTY
-                        #[allow(unsafe_code)]
-                        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(pty_fd) };
-                        if let Err(e) = nix::unistd::write(borrowed_fd, &input_buf[..n]) {
-                            warn!("Failed to write to PTY: {}", e);
+                        // Get fd while holding lock to ensure it's valid
+                        let mgr = manager.lock().await;
+                        if let Some(agent) = mgr.get(agent_id) {
+                            let pty_fd = agent.pty.master_fd();
+                            // SAFETY: fd is valid because we hold the lock and agent exists
+                            #[allow(unsafe_code)]
+                            let borrowed_fd = unsafe { BorrowedFd::borrow_raw(pty_fd) };
+                            if let Err(e) = nix::unistd::write(borrowed_fd, &input_buf[..n]) {
+                                warn!("Failed to write to PTY: {e}");
+                                return Ok(AttachEndReason::Error {
+                                    message: format!("PTY write error: {e}"),
+                                });
+                            }
+                        } else {
                             return Ok(AttachEndReason::Error {
-                                message: format!("PTY write error: {}", e),
+                                message: "agent no longer exists".to_string(),
                             });
                         }
                     }
@@ -540,7 +583,7 @@ async fn run_attach_bridge(
 
             // Poll PTY for output
             _ = poll_interval.tick() => {
-                // Check if agent is still running
+                // Hold lock while accessing agent and its fd
                 let mut mgr = manager.lock().await;
                 if let Some(agent) = mgr.get_mut(agent_id) {
                     // Check for exit
@@ -555,7 +598,9 @@ async fn run_attach_bridge(
                         });
                     }
 
-                    // Read from PTY
+                    // Read from PTY - fd is valid because we hold lock
+                    let pty_fd = agent.pty.master_fd();
+                    // SAFETY: fd is valid because we hold the lock and agent exists
                     #[allow(unsafe_code)]
                     let borrowed_fd = unsafe { BorrowedFd::borrow_raw(pty_fd) };
                     match nix::unistd::read(borrowed_fd, &mut output_buf) {
@@ -582,7 +627,7 @@ async fn run_attach_bridge(
                             }
                         }
                         Err(e) => {
-                            warn!("PTY read error: {}", e);
+                            warn!("PTY read error: {e}");
                         }
                     }
                 } else {
