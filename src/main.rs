@@ -357,39 +357,27 @@ async fn run_client(
                 let mut last_len = 0usize;
                 let poll_interval = Duration::from_millis(100);
 
-                // If replay mode, first output the current screen state
+                // If replay mode, clear screen and replay entire transcript
+                // This lets TUI programs rebuild their screen state correctly
                 if replay {
-                    // Get current transcript size so we don't duplicate output
-                    let response = client
-                        .request(Request::Tail {
-                            id: id.clone(),
-                            lines: 0, // We just want the size
-                            follow: false,
-                        })
-                        .await?;
+                    // Clear screen and move cursor home
+                    print!("\x1b[2J\x1b[H");
+                    std::io::stdout().flush()?;
 
-                    if let Response::Output { data } = response {
-                        last_len = data.len();
-                    }
-
-                    // Now get and display the screen snapshot
+                    // Get and output the entire transcript so far
                     let response = client
-                        .request(Request::Snapshot {
+                        .request(Request::Dump {
                             id: id.clone(),
-                            strip_colors: false, // Keep ANSI codes for TUI
+                            since: None,
+                            format: crate::DumpFormat::Text,
                         })
                         .await?;
 
                     match response {
-                        Response::Snapshot { content, .. } => {
-                            // Clear screen and move cursor home for clean TUI display
-                            print!("\x1b[2J\x1b[H");
-                            print!("{content}");
-                            // Ensure we end on a newline so streaming output starts fresh
-                            if !content.ends_with('\n') {
-                                println!();
-                            }
+                        Response::Output { data } => {
+                            std::io::stdout().write_all(&data)?;
                             std::io::stdout().flush()?;
+                            last_len = data.len();
                         }
                         Response::Error { message } => {
                             return Err(message.into());

@@ -103,6 +103,16 @@ impl Transcript {
         self.current_size
     }
 
+    /// Get all data as a single byte vector.
+    #[must_use]
+    pub fn all_bytes(&self) -> Vec<u8> {
+        let mut result = Vec::with_capacity(self.current_size);
+        for entry in &self.entries {
+            result.extend_from_slice(&entry.data);
+        }
+        result
+    }
+
     /// Clear the transcript.
     pub fn clear(&mut self) {
         self.entries.clear();

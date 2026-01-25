@@ -464,9 +464,8 @@ async fn handle_request(
         } => {
             let mgr = manager.lock().await;
             if let Some(agent) = mgr.get(&id) {
-                // For now, return the last chunk of the transcript
-                // TODO: implement proper line-based tail and follow mode
-                let data = agent.transcript.tail_bytes(4096);
+                // Return full transcript - client handles offset tracking
+                let data = agent.transcript.all_bytes();
                 Response::Output { data }
             } else {
                 Response::error(format!("agent not found: {id}"))
