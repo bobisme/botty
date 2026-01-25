@@ -253,4 +253,10 @@ impl TmuxView {
     pub fn is_empty(&self) -> bool {
         self.active_panes.is_empty()
     }
+
+    /// Mark a pane as existing (for initializing from known state).
+    /// This doesn't create a pane, just tracks that one exists.
+    pub fn mark_pane_exists(&mut self, agent_id: &str) {
+        self.active_panes.insert(agent_id.to_string());
+    }
 }

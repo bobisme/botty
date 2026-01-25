@@ -945,8 +945,9 @@ async fn run_view_command(
 
     // Spawn a task to listen for events and manage panes
     let socket_path_clone = socket_path.clone();
+    let existing_agents = current_agents.clone();
     let event_handle = tokio::spawn(async move {
-        if let Err(e) = run_view_event_loop(socket_path_clone).await {
+        if let Err(e) = run_view_event_loop(socket_path_clone, existing_agents).await {
             tracing::warn!("Event loop error: {}", e);
         }
     });
@@ -966,6 +967,7 @@ async fn run_view_command(
 /// Background task that listens for events and manages tmux panes.
 async fn run_view_event_loop(
     socket_path: std::path::PathBuf,
+    existing_agents: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use botty::protocol::Event;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -980,6 +982,11 @@ async fn run_view_event_loop(
         .map_or_else(|_| "botty".to_string(), |p| p.to_string_lossy().to_string());
 
     let mut view = TmuxView::new(botty_path);
+    
+    // Initialize with existing agents so we track them properly
+    for agent_id in existing_agents {
+        view.mark_pane_exists(&agent_id);
+    }
 
     // Subscribe to events (no output, just lifecycle)
     let request = Request::Events {
