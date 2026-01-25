@@ -1,6 +1,6 @@
 //! botty — PTY-based Agent Runtime
 
-use botty::{default_socket_path, run_attach, AttachConfig, Cli, Client, Command, DumpFormat, Request, Response, Server};
+use botty::{default_socket_path, run_attach, AttachConfig, Cli, Client, Command, DumpFormat, Request, Response, Server, TmuxView, ViewError};
 use clap::Parser;
 use std::io::Write;
 use tracing::error;
@@ -181,6 +181,11 @@ async fn run_client(
     // Events command needs direct socket access (long-lived connection)
     if let Command::Events { filter, output } = command {
         return run_events_command(socket_path, filter, output).await;
+    }
+
+    // View command manages tmux session
+    if let Command::View { mux } = command {
+        return run_view_command(socket_path, mux).await;
     }
 
     let mut client = Client::new(socket_path);
@@ -504,7 +509,7 @@ async fn run_client(
         }
 
         // These commands are handled before this match
-        Command::Attach { .. } | Command::Server { .. } | Command::Doctor | Command::Events { .. } => {
+        Command::Attach { .. } | Command::Server { .. } | Command::Doctor | Command::Events { .. } | Command::View { .. } => {
             unreachable!("handled above")
         }
 
@@ -860,6 +865,152 @@ async fn run_events_command(
                 _ => {
                     // Ignore other responses
                 }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_view_command(
+    socket_path: std::path::PathBuf,
+    mux: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    // Only tmux is supported for now
+    if mux != "tmux" {
+        return Err(ViewError::UnsupportedMux(mux).into());
+    }
+
+    // Check tmux is available
+    TmuxView::check_tmux()?;
+
+    // Get the path to our own binary
+    let botty_path = std::env::current_exe()
+        .map_or_else(|_| "botty".to_string(), |p| p.to_string_lossy().to_string());
+
+    let mut view = TmuxView::new(botty_path);
+
+    // Connect to server to get current agents
+    let stream = UnixStream::connect(&socket_path).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    // Get the list of current agents
+    let list_request = Request::List;
+    let mut json = serde_json::to_string(&list_request)?;
+    json.push('\n');
+    writer.write_all(json.as_bytes()).await?;
+
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+    
+    let current_agents: Vec<String> = match serde_json::from_str::<Response>(&line)? {
+        Response::Agents { agents } => agents
+            .into_iter()
+            .filter(|a| a.state == botty::AgentState::Running)
+            .map(|a| a.id)
+            .collect(),
+        Response::Error { message } => return Err(message.into()),
+        _ => return Err("unexpected response to list".into()),
+    };
+
+    // Create or reuse tmux session
+    if !view.session_exists() {
+        view.create_session()?;
+    }
+
+    // Create panes for existing agents
+    for agent_id in &current_agents {
+        view.add_pane(agent_id)?;
+    }
+
+    // If no agents, show a message
+    if current_agents.is_empty() {
+        eprintln!("No agents running. Waiting for agents to spawn...");
+    }
+
+    // Spawn a task to listen for events and manage panes
+    let socket_path_clone = socket_path.clone();
+    let event_handle = tokio::spawn(async move {
+        if let Err(e) = run_view_event_loop(socket_path_clone).await {
+            tracing::warn!("Event loop error: {}", e);
+        }
+    });
+
+    // Attach to tmux (this blocks until user detaches or session ends)
+    let attach_result = view.attach();
+
+    // Abort the event loop task
+    event_handle.abort();
+
+    // If attach failed, return the error
+    attach_result?;
+
+    Ok(())
+}
+
+/// Background task that listens for events and manages tmux panes.
+async fn run_view_event_loop(
+    socket_path: std::path::PathBuf,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use botty::protocol::Event;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let stream = UnixStream::connect(&socket_path).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    // Get botty path
+    let botty_path = std::env::current_exe()
+        .map_or_else(|_| "botty".to_string(), |p| p.to_string_lossy().to_string());
+
+    let mut view = TmuxView::new(botty_path);
+
+    // Subscribe to events (no output, just lifecycle)
+    let request = Request::Events {
+        filter: vec![],
+        include_output: false,
+    };
+    let mut json = serde_json::to_string(&request)?;
+    json.push('\n');
+    writer.write_all(json.as_bytes()).await?;
+
+    // Process events
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 {
+            // Server disconnected
+            break;
+        }
+
+        if let Ok(response) = serde_json::from_str::<Response>(&line) {
+            match response {
+                Response::Event(Event::AgentSpawned { id, .. }) => {
+                    if let Err(e) = view.add_pane(&id) {
+                        tracing::warn!("Failed to add pane for {}: {}", id, e);
+                    }
+                }
+                Response::Event(Event::AgentExited { id, .. }) => {
+                    if let Err(e) = view.remove_pane(&id) {
+                        tracing::warn!("Failed to remove pane for {}: {}", id, e);
+                    }
+                    
+                    // If no more panes, kill the session
+                    if view.is_empty() {
+                        view.kill_session()?;
+                        break;
+                    }
+                }
+                Response::Error { message } => {
+                    return Err(message.into());
+                }
+                _ => {}
             }
         }
     }

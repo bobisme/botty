@@ -272,6 +272,13 @@ pub enum Command {
         #[arg(long)]
         output: bool,
     },
+
+    /// Launch a tmux viewer showing all agents.
+    View {
+        /// Multiplexer to use (currently only tmux is supported).
+        #[arg(long, default_value = "tmux")]
+        mux: String,
+    },
 }
 
 #[cfg(test)]

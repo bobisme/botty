@@ -144,31 +144,42 @@ botty is the control plane; viewers are replaceable skins.
 ### `botty view`
 
 ```bash
-botty view                 # defaults to tmux
+botty view                 # defaults to tmux (v0: tmux only)
 botty view --mux=tmux
-botty view --mux=zellij
-botty view --mux=none      # future internal TUI
 ```
 
-### tmux / zellij Mode
+### tmux Mode (v0)
 
-- botty creates or reuses a session
-- one pane per agent
-- each pane runs:
+**Session**: Named `botty`, created or reused.
 
-  ```bash
-  botty tail <id> --mode=screen --follow
-  ```
+**Layout**: Tiled (tmux's `tiled` layout), one pane per agent.
 
-- panes are read-only by default
+**Pane content**: Each pane runs:
 
-To interact:
+```bash
+botty tail --replay <id>
+```
+
+This shows the current screen state immediately, then streams updates.
+Panes are titled with the agent ID.
+
+**Lifecycle**:
+- On startup: create panes for all existing agents
+- On `agent_spawned` event: add new pane
+- On `agent_exited` event: close pane
+- When all agents exit: close the tmux session
+
+**Interaction**: Panes are read-only viewers. To interact:
 
 ```bash
 botty attach <id>
 ```
 
-tmux/zellij never own the PTY — they are viewers only.
+tmux never owns the PTY — it is a viewer only.
+
+### Future: zellij, built-in TUI
+
+Deferred to post-v0. The `--mux` flag exists for forward compatibility.
 
 ---
 
@@ -202,7 +213,10 @@ botty kill 3
 - Persistence / crash recovery
 - Recording + replay with timing
 - Remote or multi-host runners
-- Structured events alongside terminal output
+
+## Resolved Decisions
+
+- **Structured events**: Implemented via `botty events` command. Streams JSON events for agent lifecycle (spawned, output, exited). Enables reactive orchestration.
 
 ---
 
