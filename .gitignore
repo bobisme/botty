@@ -2,3 +2,6 @@
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# BotBus agent coordination state (session-specific)
+.botbus/
