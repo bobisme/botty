@@ -1,0 +1,30 @@
+[package]
+name = "botty-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dependencies.botty]
+path = ".."
+
+[[bin]]
+name = "fuzz_protocol"
+path = "fuzz_targets/fuzz_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_request_handling"
+path = "fuzz_targets/fuzz_request_handling.rs"
+test = false
+doc = false
+bench = false
