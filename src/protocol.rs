@@ -35,6 +35,9 @@ pub enum Request {
         /// Terminal columns (default: 80).
         #[serde(default = "default_cols")]
         cols: u16,
+        /// Optional custom agent ID (must be unique).
+        #[serde(default)]
+        name: Option<String>,
     },
 
     /// List all agents.
@@ -313,6 +316,7 @@ mod tests {
                 cmd: vec!["bash".into(), "-c".into(), "echo hello".into()],
                 rows: 24,
                 cols: 80,
+                name: None,
             },
             Request::List,
             Request::Kill {

@@ -61,8 +61,8 @@ async fn run_client(
     let mut client = Client::new(socket_path);
 
     match command {
-        Command::Spawn { rows, cols, cmd } => {
-            let request = Request::Spawn { cmd, rows, cols };
+        Command::Spawn { rows, cols, name, cmd } => {
+            let request = Request::Spawn { cmd, rows, cols, name };
             let response = client.request(request).await?;
 
             match response {

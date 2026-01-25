@@ -80,6 +80,7 @@ async fn test_spawn_and_list() {
             cmd: vec!["sleep".into(), "10".into()],
             rows: 24,
             cols: 80,
+            name: None,
         })
         .await
         .expect("spawn failed");
@@ -142,6 +143,7 @@ async fn test_spawn_send_snapshot() {
             cmd: vec!["bash".into()],
             rows: 24,
             cols: 80,
+            name: None,
         })
         .await
         .expect("spawn failed");
@@ -264,6 +266,7 @@ async fn test_screen_cursor_movement() {
             ],
             rows: 24,
             cols: 80,
+            name: None,
         })
         .await
         .expect("spawn failed");
@@ -333,6 +336,7 @@ async fn test_transcript_tail() {
             ],
             rows: 24,
             cols: 80,
+            name: None,
         })
         .await
         .expect("spawn failed");
@@ -400,6 +404,7 @@ async fn test_attach_and_detach() {
             cmd: vec!["bash".into()],
             rows: 24,
             cols: 80,
+            name: None,
         })
         .await
         .expect("spawn failed");
@@ -488,6 +493,7 @@ async fn test_attach_readonly_mode() {
             cmd: vec!["sh".into(), "-c".into(), "echo HELLO; sleep 10".into()],
             rows: 24,
             cols: 80,
+            name: None,
         })
         .await
         .expect("spawn failed");
@@ -604,6 +610,7 @@ async fn test_attach_receives_output() {
             cmd: vec!["bash".into()],
             rows: 24,
             cols: 80,
+            name: None,
         })
         .await
         .expect("spawn failed");
@@ -696,6 +703,7 @@ async fn test_attach_agent_exit() {
             cmd: vec!["sh".into(), "-c".into(), "sleep 0.5; exit 42".into()],
             rows: 24,
             cols: 80,
+            name: None,
         })
         .await
         .expect("spawn failed");

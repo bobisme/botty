@@ -73,6 +73,10 @@ pub enum Command {
         #[arg(long, default_value = "80")]
         cols: u16,
 
+        /// Custom agent ID (must be unique, defaults to generated name).
+        #[arg(long, short)]
+        name: Option<String>,
+
         /// Command to run (after --).
         #[arg(last = true, required = true)]
         cmd: Vec<String>,

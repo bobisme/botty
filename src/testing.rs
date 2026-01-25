@@ -99,6 +99,7 @@ impl TestHarness {
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
             rows,
             cols,
+            name: None,
         };
 
         let response = self

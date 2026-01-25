@@ -374,3 +374,61 @@ fn test_wait_timeout() {
         .assert()
         .success();
 }
+
+#[test]
+fn test_spawn_with_custom_name() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    // Spawn with custom name
+    let output = env
+        .botty()
+        .args(["spawn", "--name", "my-worker", "--", "sleep", "30"])
+        .output()
+        .expect("failed to run spawn");
+
+    assert!(output.status.success(), "spawn should succeed");
+    let agent_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(agent_id, "my-worker", "should return the custom name");
+
+    // List should show the custom name
+    env.botty()
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("my-worker"));
+
+    // Clean up
+    env.botty()
+        .args(["kill", "-9", "my-worker"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_spawn_duplicate_name_fails() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    // Spawn first agent with custom name
+    let output = env
+        .botty()
+        .args(["spawn", "--name", "unique-name", "--", "sleep", "30"])
+        .output()
+        .expect("failed to run spawn");
+
+    assert!(output.status.success(), "first spawn should succeed");
+
+    // Try to spawn second agent with same name - should fail
+    env.botty()
+        .args(["spawn", "--name", "unique-name", "--", "sleep", "30"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already in use"));
+
+    // Clean up
+    env.botty()
+        .args(["kill", "-9", "unique-name"])
+        .assert()
+        .success();
+}

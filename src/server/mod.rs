@@ -241,15 +241,35 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
     match request {
         Request::Ping => Response::Pong,
 
-        Request::Spawn { cmd, rows, cols } => {
+        Request::Spawn { cmd, rows, cols, name } => {
             if cmd.is_empty() {
                 return Response::error("command is empty");
             }
 
+            // Validate and resolve agent ID
+            let mut mgr = manager.lock().await;
+            let id = if let Some(custom_name) = name {
+                // Validate custom name
+                if custom_name.is_empty() {
+                    return Response::error("agent name cannot be empty");
+                }
+                // Check for uniqueness
+                if mgr.get(&custom_name).is_some() {
+                    return Response::error(format!("agent name already in use: {custom_name}"));
+                }
+                custom_name
+            } else {
+                mgr.generate_id()
+            };
+            drop(mgr); // Release lock before spawning
+
             match pty::spawn(&cmd, rows, cols) {
                 Ok(pty_process) => {
                     let mut mgr = manager.lock().await;
-                    let id = mgr.generate_id();
+                    // Double-check uniqueness (in case of race)
+                    if mgr.get(&id).is_some() {
+                        return Response::error(format!("agent name already in use: {id}"));
+                    }
                     let pid = pty_process.pid.as_raw() as u32;
                     let agent = Agent::new(id.clone(), cmd, pty_process, rows, cols);
                     mgr.add(agent);
