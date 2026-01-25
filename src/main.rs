@@ -148,8 +148,8 @@ async fn run_client(
             }
         }
 
-        Command::Kill { id, force } => {
-            let signal = if force { 9 } else { 15 }; // SIGKILL or SIGTERM
+        Command::Kill { id, term } => {
+            let signal = if term { 15 } else { 9 }; // SIGTERM or SIGKILL (default)
             let request = Request::Kill { id, signal };
             let response = client.request(request).await?;
 

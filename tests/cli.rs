@@ -185,7 +185,7 @@ fn test_send_and_snapshot() {
 
     // Clean up
     env.botty()
-        .args(["kill", "-9", &agent_id])
+        .args(["kill", &agent_id])
         .assert()
         .success();
 }
@@ -223,7 +223,7 @@ fn test_tail() {
 
     // Clean up
     env.botty()
-        .args(["kill", "-9", &agent_id])
+        .args(["kill", &agent_id])
         .assert()
         .success();
 }
@@ -275,7 +275,7 @@ fn test_send_bytes_hex() {
 
     // Clean up
     env.botty()
-        .args(["kill", "-9", &agent_id])
+        .args(["kill", &agent_id])
         .assert()
         .success();
 }
@@ -334,7 +334,7 @@ fn test_wait_for_content() {
 
     // Clean up
     env.botty()
-        .args(["kill", "-9", &agent_id])
+        .args(["kill", &agent_id])
         .assert()
         .success();
 }
@@ -370,7 +370,7 @@ fn test_wait_timeout() {
 
     // Clean up
     env.botty()
-        .args(["kill", "-9", &agent_id])
+        .args(["kill", &agent_id])
         .assert()
         .success();
 }
@@ -400,7 +400,7 @@ fn test_spawn_with_custom_name() {
 
     // Clean up
     env.botty()
-        .args(["kill", "-9", "my-worker"])
+        .args(["kill", "my-worker"])
         .assert()
         .success();
 }
@@ -428,7 +428,7 @@ fn test_spawn_duplicate_name_fails() {
 
     // Clean up
     env.botty()
-        .args(["kill", "-9", "unique-name"])
+        .args(["kill", "unique-name"])
         .assert()
         .success();
 }

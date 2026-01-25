@@ -98,9 +98,9 @@ pub enum Command {
         /// Agent ID.
         id: String,
 
-        /// Send SIGKILL instead of SIGTERM.
-        #[arg(long, short = '9')]
-        force: bool,
+        /// Send SIGTERM instead of SIGKILL (for graceful shutdown).
+        #[arg(long)]
+        term: bool,
     },
 
     /// Send input to an agent.

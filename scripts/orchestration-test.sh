@@ -26,9 +26,9 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # Cleanup function
 cleanup() {
 	log "Cleaning up..."
-	$BOTTY kill -9 frontend-worker 2>/dev/null || true
-	$BOTTY kill -9 backend-worker 2>/dev/null || true
-	$BOTTY kill -9 test-runner 2>/dev/null || true
+	$BOTTY kill frontend-worker 2>/dev/null || true
+	$BOTTY kill backend-worker 2>/dev/null || true
+	$BOTTY kill test-runner 2>/dev/null || true
 	$BOTTY shutdown 2>/dev/null || true
 	rm -rf /tmp/botty-test-app 2>/dev/null || true
 }
@@ -112,9 +112,9 @@ fi
 log "=== Phase 7: Cleanup ==="
 
 # Kill with SIGKILL (bash ignores SIGTERM)
-$BOTTY kill -9 frontend-worker
-$BOTTY kill -9 backend-worker
-$BOTTY kill -9 test-runner
+$BOTTY kill frontend-worker
+$BOTTY kill backend-worker
+$BOTTY kill test-runner
 
 # Wait for processes to die - SIGKILL should be immediate but PTY cleanup takes time
 sleep 0.5
