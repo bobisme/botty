@@ -13,15 +13,18 @@ pub use manager::AgentManager;
 pub use screen::Screen;
 pub use transcript::Transcript;
 
-use crate::protocol::{AgentInfo, AgentState, DumpFormat, Request, Response, TranscriptEntry};
+use crate::protocol::{
+    AgentInfo, AgentState, AttachEndReason, DumpFormat, Request, Response, TranscriptEntry,
+};
 use crate::pty;
 use nix::sys::signal::Signal;
 use std::os::fd::BorrowedFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, error, info, warn};
@@ -134,8 +137,9 @@ async fn handle_connection(
     manager: Arc<Mutex<AgentManager>>,
     shutdown_tx: broadcast::Sender<()>,
 ) -> Result<(), ServerError> {
-    let (reader, mut writer) = stream.into_split();
+    let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
+    let mut writer = writer;
     let mut line = String::new();
 
     loop {
@@ -163,6 +167,29 @@ async fn handle_connection(
         };
 
         debug!(?request, "Received request");
+
+        // Handle attach request specially - it switches to streaming mode
+        if let Request::Attach { id, readonly } = &request {
+            let attach_result = handle_attach(
+                id.clone(),
+                *readonly,
+                reader.into_inner(),
+                writer,
+                &manager,
+            )
+            .await;
+
+            match attach_result {
+                Ok(_) => {
+                    debug!("Attach session ended normally");
+                }
+                Err(e) => {
+                    warn!("Attach session error: {}", e);
+                }
+            }
+            // After attach, the connection is done
+            return Ok(());
+        }
 
         let is_shutdown = matches!(request, Request::Shutdown);
         let response = handle_request(request, &manager).await;
@@ -366,11 +393,11 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
         }
 
         Request::Attach { id, readonly: _ } => {
-            // TODO: Implement attach mode properly
-            // This requires switching to a streaming protocol
+            // Attach is handled specially in handle_connection
+            // If we get here, something went wrong
             let mgr = manager.lock().await;
             if mgr.get(&id).is_some() {
-                Response::error("attach mode not yet implemented")
+                Response::error("attach request should not reach handle_request")
             } else {
                 Response::error(format!("agent not found: {}", id))
             }
@@ -380,6 +407,181 @@ async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) ->
             info!("Shutdown requested");
             // TODO: Actually trigger shutdown
             Response::Ok
+        }
+    }
+}
+
+/// Handle attach mode - streaming I/O between client and agent PTY.
+async fn handle_attach(
+    agent_id: String,
+    readonly: bool,
+    mut reader: OwnedReadHalf,
+    mut writer: OwnedWriteHalf,
+    manager: &Arc<Mutex<AgentManager>>,
+) -> Result<(), ServerError> {
+    // Check if agent exists and get initial info
+    let (pty_fd, size) = {
+        let mgr = manager.lock().await;
+        match mgr.get(&agent_id) {
+            Some(agent) => {
+                if !agent.is_running() {
+                    let response = Response::error(format!("agent {} has exited", agent_id));
+                    let mut json = serde_json::to_string(&response).unwrap();
+                    json.push('\n');
+                    writer.write_all(json.as_bytes()).await.ok();
+                    return Ok(());
+                }
+                (agent.pty.master_fd(), agent.screen.size())
+            }
+            None => {
+                let response = Response::error(format!("agent not found: {}", agent_id));
+                let mut json = serde_json::to_string(&response).unwrap();
+                json.push('\n');
+                writer.write_all(json.as_bytes()).await.ok();
+                return Ok(());
+            }
+        }
+    };
+
+    // Send AttachStarted response
+    let response = Response::AttachStarted {
+        id: agent_id.clone(),
+        size,
+    };
+    let mut json = serde_json::to_string(&response).unwrap();
+    json.push('\n');
+    writer
+        .write_all(json.as_bytes())
+        .await
+        .map_err(ServerError::Io)?;
+
+    info!("Attach started for agent {}", agent_id);
+
+    // Run the I/O bridge
+    let result = run_attach_bridge(
+        &agent_id,
+        pty_fd,
+        readonly,
+        &mut reader,
+        &mut writer,
+        manager,
+    )
+    .await;
+
+    // Send AttachEnded response
+    let end_reason = match &result {
+        Ok(reason) => reason.clone(),
+        Err(e) => AttachEndReason::Error {
+            message: e.to_string(),
+        },
+    };
+
+    let response = Response::AttachEnded { reason: end_reason };
+    let mut json = serde_json::to_string(&response).unwrap();
+    json.push('\n');
+    writer.write_all(json.as_bytes()).await.ok();
+
+    info!("Attach ended for agent {}", agent_id);
+
+    result.map(|_| ())
+}
+
+/// Run the attach mode I/O bridge.
+async fn run_attach_bridge(
+    agent_id: &str,
+    pty_fd: i32,
+    readonly: bool,
+    reader: &mut OwnedReadHalf,
+    writer: &mut OwnedWriteHalf,
+    manager: &Arc<Mutex<AgentManager>>,
+) -> Result<AttachEndReason, ServerError> {
+    let mut input_buf = [0u8; 4096];
+    let mut output_buf = [0u8; 4096];
+
+    // Create a ticker for polling the PTY
+    let mut poll_interval = tokio::time::interval(Duration::from_millis(10));
+
+    loop {
+        tokio::select! {
+            // Read input from client
+            result = reader.read(&mut input_buf), if !readonly => {
+                match result {
+                    Ok(0) => {
+                        // Client disconnected - treat as detach
+                        debug!("Client disconnected during attach");
+                        return Ok(AttachEndReason::Detached);
+                    }
+                    Ok(n) => {
+                        // Write to PTY
+                        #[allow(unsafe_code)]
+                        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(pty_fd) };
+                        if let Err(e) = nix::unistd::write(borrowed_fd, &input_buf[..n]) {
+                            warn!("Failed to write to PTY: {}", e);
+                            return Ok(AttachEndReason::Error {
+                                message: format!("PTY write error: {}", e),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        return Err(ServerError::Io(e));
+                    }
+                }
+            }
+
+            // Poll PTY for output
+            _ = poll_interval.tick() => {
+                // Check if agent is still running
+                let mut mgr = manager.lock().await;
+                if let Some(agent) = mgr.get_mut(agent_id) {
+                    // Check for exit
+                    if let Ok(Some(code)) = agent.pty.try_wait() {
+                        agent.state = InternalAgentState::Exited { code };
+                        return Ok(AttachEndReason::AgentExited { exit_code: Some(code) });
+                    }
+
+                    if !agent.is_running() {
+                        return Ok(AttachEndReason::AgentExited {
+                            exit_code: agent.exit_code(),
+                        });
+                    }
+
+                    // Read from PTY
+                    #[allow(unsafe_code)]
+                    let borrowed_fd = unsafe { BorrowedFd::borrow_raw(pty_fd) };
+                    match nix::unistd::read(borrowed_fd, &mut output_buf) {
+                        Ok(n) if n > 0 => {
+                            let data = &output_buf[..n];
+                            // Update transcript and screen
+                            agent.transcript.append(data);
+                            agent.screen.process(data);
+                            // Send to client
+                            drop(mgr); // Release lock before async write
+                            writer.write_all(data).await.map_err(ServerError::Io)?;
+                        }
+                        Ok(_) => {
+                            // No data
+                        }
+                        Err(nix::Error::EAGAIN) => {
+                            // No data available
+                        }
+                        Err(nix::Error::EIO) => {
+                            // PTY closed - agent probably exited
+                            if let Ok(Some(code)) = agent.pty.try_wait() {
+                                agent.state = InternalAgentState::Exited { code };
+                                return Ok(AttachEndReason::AgentExited { exit_code: Some(code) });
+                            }
+                        }
+                        Err(e) => {
+                            warn!("PTY read error: {}", e);
+                        }
+                    }
+                } else {
+                    // Agent was removed
+                    return Ok(AttachEndReason::Error {
+                        message: "agent no longer exists".to_string(),
+                    });
+                }
+            }
         }
     }
 }

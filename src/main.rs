@@ -1,6 +1,6 @@
 //! botty — PTY-based Agent Runtime
 
-use botty::{default_socket_path, Cli, Client, Command, DumpFormat, Request, Response, Server};
+use botty::{default_socket_path, run_attach, AttachConfig, Cli, Client, Command, DumpFormat, Request, Response, Server};
 use clap::Parser;
 use std::io::Write;
 use tracing::error;
@@ -53,6 +53,11 @@ async fn run_client(
     socket_path: std::path::PathBuf,
     command: Command,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Attach command needs direct socket access, handle it separately
+    if let Command::Attach { id, readonly } = command {
+        return run_attach_command(socket_path, id, readonly).await;
+    }
+
     let mut client = Client::new(socket_path);
 
     match command {
@@ -231,19 +236,8 @@ async fn run_client(
             }
         }
 
-        Command::Attach { id, readonly } => {
-            let request = Request::Attach { id, readonly };
-            let response = client.request(request).await?;
-
-            match response {
-                Response::Error { message } => {
-                    return Err(message.into());
-                }
-                _ => {
-                    // Attach mode not yet implemented
-                    return Err("attach mode not yet implemented".into());
-                }
-            }
+        Command::Attach { .. } => {
+            unreachable!("handled above")
         }
 
         Command::Shutdown => {
@@ -264,6 +258,68 @@ async fn run_client(
 
         Command::Server { .. } => {
             unreachable!("handled above")
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_attach_command(
+    socket_path: std::path::PathBuf,
+    id: String,
+    readonly: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::net::UnixStream;
+
+    // Connect to the server
+    let mut stream = match UnixStream::connect(&socket_path).await {
+        Ok(s) => s,
+        Err(e) => {
+            // Try to start server if not running
+            if e.kind() == std::io::ErrorKind::ConnectionRefused
+                || e.kind() == std::io::ErrorKind::NotFound
+            {
+                // Start server in background
+                let socket_path_clone = socket_path.clone();
+                tokio::spawn(async move {
+                    let mut server = Server::new(socket_path_clone);
+                    let _ = server.run().await;
+                });
+                // Give server time to start
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                UnixStream::connect(&socket_path).await?
+            } else {
+                return Err(e.into());
+            }
+        }
+    };
+
+    let config = AttachConfig {
+        readonly,
+        ..Default::default()
+    };
+
+    match run_attach(&mut stream, &id, config).await {
+        Ok(reason) => {
+            use botty::protocol::AttachEndReason;
+            match reason {
+                AttachEndReason::Detached => {
+                    eprintln!("\r\nDetached from {}", id);
+                }
+                AttachEndReason::AgentExited { exit_code } => {
+                    if let Some(code) = exit_code {
+                        eprintln!("\r\nAgent {} exited with code {}", id, code);
+                    } else {
+                        eprintln!("\r\nAgent {} exited", id);
+                    }
+                }
+                AttachEndReason::Error { message } => {
+                    return Err(message.into());
+                }
+            }
+        }
+        Err(e) => {
+            return Err(e.into());
         }
     }
 

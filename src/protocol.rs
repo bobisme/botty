@@ -218,6 +218,37 @@ pub enum Response {
         /// Exit code.
         exit_code: Option<i32>,
     },
+
+    /// Attach mode started - connection switches to streaming.
+    /// After this response, the protocol changes:
+    /// - Client sends raw bytes (prefixed with length) which go to agent PTY
+    /// - Server sends raw bytes (prefixed with length) from agent PTY output
+    /// - A zero-length message from client signals detach
+    /// - AgentExited is sent if agent exits during attach
+    AttachStarted {
+        /// Agent ID.
+        id: String,
+        /// Current terminal size.
+        size: (u16, u16),
+    },
+
+    /// Attach mode ended (sent after detach or agent exit).
+    AttachEnded {
+        /// Reason for ending.
+        reason: AttachEndReason,
+    },
+}
+
+/// Reason attach mode ended.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachEndReason {
+    /// User requested detach.
+    Detached,
+    /// Agent process exited.
+    AgentExited { exit_code: Option<i32> },
+    /// An error occurred.
+    Error { message: String },
 }
 
 impl Response {
