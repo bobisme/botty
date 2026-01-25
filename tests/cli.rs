@@ -184,10 +184,7 @@ fn test_send_and_snapshot() {
         .stdout(predicate::str::contains("UNIQUE_TEST_STRING_12345"));
 
     // Clean up
-    env.botty()
-        .args(["kill", &agent_id])
-        .assert()
-        .success();
+    env.botty().args(["kill", &agent_id]).assert().success();
 }
 
 #[test]
@@ -222,10 +219,7 @@ fn test_tail() {
         .stdout(predicate::str::contains("SECOND_LINE"));
 
     // Clean up
-    env.botty()
-        .args(["kill", &agent_id])
-        .assert()
-        .success();
+    env.botty().args(["kill", &agent_id]).assert().success();
 }
 
 #[test]
@@ -274,10 +268,7 @@ fn test_send_bytes_hex() {
         .success();
 
     // Clean up
-    env.botty()
-        .args(["kill", &agent_id])
-        .assert()
-        .success();
+    env.botty().args(["kill", &agent_id]).assert().success();
 }
 
 #[test]
@@ -333,10 +324,7 @@ fn test_wait_for_content() {
         .stdout(predicate::str::contains("MARKER_READY"));
 
     // Clean up
-    env.botty()
-        .args(["kill", &agent_id])
-        .assert()
-        .success();
+    env.botty().args(["kill", &agent_id]).assert().success();
 }
 
 #[test]
@@ -369,10 +357,7 @@ fn test_wait_timeout() {
         .stderr(predicate::str::contains("timeout"));
 
     // Clean up
-    env.botty()
-        .args(["kill", &agent_id])
-        .assert()
-        .success();
+    env.botty().args(["kill", &agent_id]).assert().success();
 }
 
 #[test]
@@ -399,10 +384,7 @@ fn test_spawn_with_custom_name() {
         .stdout(predicate::str::contains("my-worker"));
 
     // Clean up
-    env.botty()
-        .args(["kill", "my-worker"])
-        .assert()
-        .success();
+    env.botty().args(["kill", "my-worker"]).assert().success();
 }
 
 #[test]
@@ -427,10 +409,7 @@ fn test_spawn_duplicate_name_fails() {
         .stderr(predicate::str::contains("already in use"));
 
     // Clean up
-    env.botty()
-        .args(["kill", "unique-name"])
-        .assert()
-        .success();
+    env.botty().args(["kill", "unique-name"]).assert().success();
 }
 
 #[test]
@@ -465,4 +444,24 @@ fn test_exec_multiline_output() {
         .stdout(predicate::str::contains("first"))
         .stdout(predicate::str::contains("second"))
         .stdout(predicate::str::contains("third"));
+}
+
+#[test]
+fn test_exec_exit_code_propagation() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    // Execute a failing command - should propagate exit code
+    env.botty()
+        .args(["exec", "--timeout", "5", "--", "false"])
+        .assert()
+        .failure()
+        .code(1);
+
+    // Execute a command that fails with code 2
+    env.botty()
+        .args(["exec", "--timeout", "5", "--", "ls /nonexistent_path_12345"])
+        .assert()
+        .failure()
+        .code(2);
 }

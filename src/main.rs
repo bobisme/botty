@@ -446,8 +446,9 @@ async fn run_client(
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Send the command with a unique marker for detecting completion
-            let marker = format!("__BOTTY_DONE_{}__", std::process::id());
-            let full_cmd = format!("{cmd_str}; echo {marker}\n");
+            // The marker includes the exit code: __BOTTY_DONE_<pid>_<exitcode>__
+            let marker_prefix = format!("__BOTTY_DONE_{}_", std::process::id());
+            let full_cmd = format!("{cmd_str}; echo {marker_prefix}$?__\n");
 
             let send_response = client
                 .request(Request::Send {
@@ -503,22 +504,44 @@ async fn run_client(
                 };
 
                 // Look for marker at the start of a line (not in command echo)
-                let marker_line = format!("\n{marker}");
-                if snapshot.contains(&marker_line) {
+                // Format: \n__BOTTY_DONE_<pid>_<exitcode>__
+                let marker_pattern = format!("\n{marker_prefix}");
+                if let Some(marker_start) = snapshot.find(&marker_pattern) {
                     // Extract output between the command echo and the marker
-                    if let Some(marker_pos) = snapshot.find(&marker_line) {
-                        // Get everything before the marker line
-                        let before_marker = &snapshot[..marker_pos];
-                        let lines: Vec<&str> = before_marker.lines().collect();
+                    let before_marker = &snapshot[..marker_start];
+                    let lines: Vec<&str> = before_marker.lines().collect();
 
-                        // Skip the first line (command echo), take the rest as output
-                        if lines.len() > 1 {
-                            let output_lines: Vec<&str> = lines
-                                .iter()
-                                .skip(1) // Skip command echo
-                                .copied()
-                                .collect();
-                            output = output_lines.join("\n");
+                    // Skip the first line (command echo), take the rest as output
+                    if lines.len() > 1 {
+                        let output_lines: Vec<&str> = lines
+                            .iter()
+                            .skip(1) // Skip command echo
+                            .copied()
+                            .collect();
+                        output = output_lines.join("\n");
+                    }
+
+                    // Extract exit code from marker
+                    let after_marker = &snapshot[marker_start + 1..]; // Skip the \n
+                    if let Some(exit_code_start) = after_marker.find(&marker_prefix) {
+                        let code_start = exit_code_start + marker_prefix.len();
+                        if let Some(code_end) = after_marker[code_start..].find("__") {
+                            let code_str = &after_marker[code_start..code_start + code_end];
+                            if let Ok(code) = code_str.parse::<i32>() {
+                                if code != 0 {
+                                    // Kill agent, print output, then exit with the command's exit code
+                                    let _ = client
+                                        .request(Request::Kill {
+                                            id: agent_id.clone(),
+                                            signal: 9,
+                                        })
+                                        .await;
+                                    if !output.is_empty() {
+                                        println!("{output}");
+                                    }
+                                    std::process::exit(code);
+                                }
+                            }
                         }
                     }
                     break;
