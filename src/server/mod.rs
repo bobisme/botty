@@ -1,0 +1,454 @@
+//! The botty server.
+//!
+//! Owns PTYs, agents, transcripts, and virtual screens.
+//! Listens on a Unix socket for client requests.
+
+mod agent;
+mod manager;
+mod screen;
+mod transcript;
+
+pub use agent::{Agent, AgentState as InternalAgentState};
+pub use manager::AgentManager;
+pub use screen::Screen;
+pub use transcript::Transcript;
+
+use crate::protocol::{AgentInfo, AgentState, DumpFormat, Request, Response, TranscriptEntry};
+use crate::pty;
+use nix::sys::signal::Signal;
+use std::os::fd::BorrowedFd;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use thiserror::Error;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{broadcast, Mutex};
+use tracing::{debug, error, info, warn};
+
+/// Errors that can occur in the server.
+#[derive(Debug, Error)]
+pub enum ServerError {
+    #[error("failed to bind socket: {0}")]
+    Bind(#[source] std::io::Error),
+
+    #[error("failed to accept connection: {0}")]
+    Accept(#[source] std::io::Error),
+
+    #[error("agent not found: {0}")]
+    AgentNotFound(String),
+
+    #[error("failed to spawn agent: {0}")]
+    Spawn(#[source] crate::pty::PtyError),
+
+    #[error("I/O error: {0}")]
+    Io(#[source] std::io::Error),
+}
+
+/// The botty server.
+pub struct Server {
+    socket_path: PathBuf,
+    manager: Arc<Mutex<AgentManager>>,
+    shutdown_tx: broadcast::Sender<()>,
+}
+
+impl Server {
+    /// Create a new server that will listen on the given socket path.
+    pub fn new(socket_path: PathBuf) -> Self {
+        let (shutdown_tx, _) = broadcast::channel(1);
+        Self {
+            socket_path,
+            manager: Arc::new(Mutex::new(AgentManager::new())),
+            shutdown_tx,
+        }
+    }
+
+    /// Run the server event loop.
+    pub async fn run(&mut self) -> Result<(), ServerError> {
+        // Remove existing socket if present
+        if self.socket_path.exists() {
+            std::fs::remove_file(&self.socket_path).ok();
+        }
+
+        // Ensure parent directory exists
+        if let Some(parent) = self.socket_path.parent() {
+            std::fs::create_dir_all(parent).map_err(ServerError::Io)?;
+        }
+
+        let listener = UnixListener::bind(&self.socket_path).map_err(ServerError::Bind)?;
+        info!("Server listening on {:?}", self.socket_path);
+
+        // Start the PTY output reader task
+        let manager = Arc::clone(&self.manager);
+        let mut pty_shutdown = self.shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = pty_reader_task(manager) => {}
+                _ = pty_shutdown.recv() => {}
+            }
+        });
+
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+        loop {
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((stream, _addr)) => {
+                            debug!("Accepted connection");
+                            let manager = Arc::clone(&self.manager);
+                            let shutdown_tx = self.shutdown_tx.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_connection(stream, manager, shutdown_tx).await {
+                                    error!("Connection error: {}", e);
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            error!("Accept error: {}", e);
+                        }
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("Shutdown signal received");
+                    break;
+                }
+            }
+        }
+
+        // Clean up socket
+        std::fs::remove_file(&self.socket_path).ok();
+        info!("Server shut down");
+        Ok(())
+    }
+
+    /// Request server shutdown.
+    pub fn shutdown(&self) {
+        let _ = self.shutdown_tx.send(());
+    }
+}
+
+/// Handle a single client connection.
+async fn handle_connection(
+    stream: UnixStream,
+    manager: Arc<Mutex<AgentManager>>,
+    shutdown_tx: broadcast::Sender<()>,
+) -> Result<(), ServerError> {
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .map_err(ServerError::Io)?;
+
+        if n == 0 {
+            // EOF - client disconnected
+            debug!("Client disconnected");
+            break;
+        }
+
+        let request: Request = match serde_json::from_str(&line) {
+            Ok(req) => req,
+            Err(e) => {
+                let response = Response::error(format!("invalid request: {}", e));
+                let mut json = serde_json::to_string(&response).unwrap();
+                json.push('\n');
+                writer.write_all(json.as_bytes()).await.ok();
+                continue;
+            }
+        };
+
+        debug!(?request, "Received request");
+
+        let is_shutdown = matches!(request, Request::Shutdown);
+        let response = handle_request(request, &manager).await;
+
+        let mut json = serde_json::to_string(&response).unwrap();
+        json.push('\n');
+        writer
+            .write_all(json.as_bytes())
+            .await
+            .map_err(ServerError::Io)?;
+
+        // Trigger shutdown after sending response
+        if is_shutdown {
+            let _ = shutdown_tx.send(());
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle a single request.
+async fn handle_request(request: Request, manager: &Arc<Mutex<AgentManager>>) -> Response {
+    match request {
+        Request::Ping => Response::Pong,
+
+        Request::Spawn { cmd, rows, cols } => {
+            if cmd.is_empty() {
+                return Response::error("command is empty");
+            }
+
+            match pty::spawn(&cmd, rows, cols) {
+                Ok(pty_process) => {
+                    let mut mgr = manager.lock().await;
+                    let id = mgr.generate_id();
+                    let pid = pty_process.pid.as_raw() as u32;
+                    let agent = Agent::new(id.clone(), cmd, pty_process, rows, cols);
+                    mgr.add(agent);
+                    info!(%id, %pid, "Spawned agent");
+                    Response::Spawned { id, pid }
+                }
+                Err(e) => Response::error(format!("spawn failed: {}", e)),
+            }
+        }
+
+        Request::List => {
+            let mgr = manager.lock().await;
+            let agents: Vec<AgentInfo> = mgr
+                .list()
+                .map(|agent| {
+                    let elapsed = agent.started_at.elapsed();
+                    let now_millis = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let started_at = now_millis.saturating_sub(elapsed.as_millis() as u64);
+
+                    AgentInfo {
+                        id: agent.id.clone(),
+                        pid: agent.pid(),
+                        state: match agent.state {
+                            InternalAgentState::Running => AgentState::Running,
+                            InternalAgentState::Exited { .. } => AgentState::Exited,
+                        },
+                        command: agent.command.clone(),
+                        size: agent.screen.size(),
+                        started_at,
+                        exit_code: agent.exit_code(),
+                    }
+                })
+                .collect();
+            Response::Agents { agents }
+        }
+
+        Request::Kill { id, signal } => {
+            let mgr = manager.lock().await;
+            if let Some(agent) = mgr.get(&id) {
+                let sig = Signal::try_from(signal).unwrap_or(Signal::SIGTERM);
+                match agent.pty.signal(sig) {
+                    Ok(_) => {
+                        info!(%id, ?sig, "Sent signal to agent");
+                        Response::Ok
+                    }
+                    Err(e) => Response::error(format!("failed to send signal: {}", e)),
+                }
+            } else {
+                Response::error(format!("agent not found: {}", id))
+            }
+        }
+
+        Request::Send { id, data, newline } => {
+            let mgr = manager.lock().await;
+            if let Some(agent) = mgr.get(&id) {
+                let mut bytes = data.into_bytes();
+                if newline {
+                    bytes.push(b'\n');
+                }
+
+                // Write to PTY master
+                let fd = agent.pty.master_fd();
+                // SAFETY: The fd is valid for the lifetime of the agent
+                #[allow(unsafe_code)]
+                let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+                match nix::unistd::write(borrowed_fd, &bytes)
+                {
+                    Ok(_) => Response::Ok,
+                    Err(e) => Response::error(format!("write failed: {}", e)),
+                }
+            } else {
+                Response::error(format!("agent not found: {}", id))
+            }
+        }
+
+        Request::SendBytes { id, data } => {
+            let mgr = manager.lock().await;
+            if let Some(agent) = mgr.get(&id) {
+                let fd = agent.pty.master_fd();
+                // SAFETY: The fd is valid for the lifetime of the agent
+                #[allow(unsafe_code)]
+                let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+                match nix::unistd::write(borrowed_fd, &data)
+                {
+                    Ok(_) => Response::Ok,
+                    Err(e) => Response::error(format!("write failed: {}", e)),
+                }
+            } else {
+                Response::error(format!("agent not found: {}", id))
+            }
+        }
+
+        Request::Tail {
+            id,
+            lines: _,
+            follow: _,
+        } => {
+            let mgr = manager.lock().await;
+            if let Some(agent) = mgr.get(&id) {
+                // For now, return the last chunk of the transcript
+                // TODO: implement proper line-based tail and follow mode
+                let data = agent.transcript.tail_bytes(4096);
+                Response::Output { data }
+            } else {
+                Response::error(format!("agent not found: {}", id))
+            }
+        }
+
+        Request::Dump { id, since, format } => {
+            let mgr = manager.lock().await;
+            if let Some(agent) = mgr.get(&id) {
+                let entries: Vec<TranscriptEntry> = if let Some(ts) = since {
+                    agent
+                        .transcript
+                        .since(ts)
+                        .into_iter()
+                        .map(|e| TranscriptEntry {
+                            timestamp: e.timestamp,
+                            data: e.data.clone(),
+                        })
+                        .collect()
+                } else {
+                    agent
+                        .transcript
+                        .all()
+                        .map(|e| TranscriptEntry {
+                            timestamp: e.timestamp,
+                            data: e.data.clone(),
+                        })
+                        .collect()
+                };
+
+                match format {
+                    DumpFormat::Jsonl => Response::Transcript { entries },
+                    DumpFormat::Text => {
+                        let data: Vec<u8> = entries.iter().flat_map(|e| e.data.clone()).collect();
+                        Response::Output { data }
+                    }
+                }
+            } else {
+                Response::error(format!("agent not found: {}", id))
+            }
+        }
+
+        Request::Snapshot { id, strip_colors } => {
+            let mgr = manager.lock().await;
+            if let Some(agent) = mgr.get(&id) {
+                let content = if strip_colors {
+                    agent.screen.snapshot()
+                } else {
+                    agent.screen.contents_formatted()
+                };
+                let cursor = agent.screen.cursor_position();
+                let size = agent.screen.size();
+                Response::Snapshot {
+                    content,
+                    cursor,
+                    size,
+                }
+            } else {
+                Response::error(format!("agent not found: {}", id))
+            }
+        }
+
+        Request::Attach { id, readonly: _ } => {
+            // TODO: Implement attach mode properly
+            // This requires switching to a streaming protocol
+            let mgr = manager.lock().await;
+            if mgr.get(&id).is_some() {
+                Response::error("attach mode not yet implemented")
+            } else {
+                Response::error(format!("agent not found: {}", id))
+            }
+        }
+
+        Request::Shutdown => {
+            info!("Shutdown requested");
+            // TODO: Actually trigger shutdown
+            Response::Ok
+        }
+    }
+}
+
+/// Background task that reads from PTY masters and updates transcripts/screens.
+async fn pty_reader_task(manager: Arc<Mutex<AgentManager>>) {
+    use tokio::time::{interval, Duration};
+
+    let mut poll_interval = interval(Duration::from_millis(10));
+
+    loop {
+        poll_interval.tick().await;
+
+        let mut mgr = manager.lock().await;
+        let ids: Vec<String> = mgr.list().map(|a| a.id.clone()).collect();
+
+        for id in ids {
+            if let Some(agent) = mgr.get_mut(&id) {
+                if !agent.is_running() {
+                    continue;
+                }
+
+                // Try to read from the PTY master
+                let fd = agent.pty.master_fd();
+                let mut buf = [0u8; 4096];
+
+                // SAFETY: The fd is valid for the lifetime of the agent
+                #[allow(unsafe_code)]
+                let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+                
+                // Non-blocking read
+                match nix::unistd::read(borrowed_fd, &mut buf) {
+                    Ok(n) if n > 0 => {
+                        let data = &buf[..n];
+                        agent.transcript.append(data);
+                        agent.screen.process(data);
+                    }
+                    Ok(_) => {
+                        // No data available
+                    }
+                    Err(nix::Error::EAGAIN) => {
+                        // No data available (non-blocking)
+                        // Note: EWOULDBLOCK == EAGAIN on Linux
+                    }
+                    Err(nix::Error::EIO) => {
+                        // PTY closed - child probably exited
+                        if let Ok(Some(code)) = agent.pty.try_wait() {
+                            agent.state = InternalAgentState::Exited { code };
+                            info!(%id, %code, "Agent exited");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(%id, %e, "PTY read error");
+                    }
+                }
+
+                // Check if child exited
+                if agent.is_running() {
+                    if let Ok(Some(code)) = agent.pty.try_wait() {
+                        agent.state = InternalAgentState::Exited { code };
+                        info!(%id, %code, "Agent exited");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Check if a server is running by trying to connect.
+pub async fn is_server_running(socket_path: &Path) -> bool {
+    UnixStream::connect(socket_path).await.is_ok()
+}

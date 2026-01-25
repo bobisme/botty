@@ -1,0 +1,39 @@
+[package]
+name = "botty"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+base64 = "0.22.1"
+clap = { version = "4.5.54", features = ["derive", "env"] }
+dirs = "6.0.0"
+hex = "0.4.3"
+libc = "0.2.180"
+names = { version = "0.14.0", default-features = false }
+nix = { version = "0.31.1", features = ["term", "signal", "process", "fs"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+tokio = { version = "1.49.0", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+vt100 = "0.16.2"
+
+[lints.rust]
+# PTY operations require unsafe (fork, ioctl, fd manipulation)
+# We use #[allow(unsafe_code)] in specific modules that need it
+unsafe_code = "warn"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+# maybe
+suspicious = { level = "warn", priority = -2 }
+complexity = { level = "warn", priority = -2 }
+perf = { level = "warn", priority = -2 }
+style = { level = "warn", priority = -2 }
+
+[dev-dependencies]
+assert_cmd = "2.1.2"
+predicates = "3.1.3"
