@@ -344,6 +344,34 @@ git push                # Push to remote
 - Use descriptive titles and set appropriate priority/type
 - Always sync before ending session
 
+### Beads Conventions
+
+**Acceptance criteria for large tasks**: When creating P0-P2 features or any task estimated to take more than a few hours, include acceptance criteria in the description. Use a checklist format:
+
+```bash
+br create --title="Add user authentication" --priority=1 --type=feature --description="
+Implement JWT-based authentication for the API.
+
+Acceptance criteria:
+- [ ] POST /auth/login returns JWT token
+- [ ] Protected routes return 401 without valid token
+- [ ] Token expiry is configurable via env var
+- [ ] Unit tests cover happy path and error cases
+- [ ] Documentation updated in API.md
+"
+```
+
+**Size guidance**:
+- **P0-P1**: Always include acceptance criteria
+- **P2**: Include if task is non-trivial (>2 hours estimated)
+- **P3-P4**: Optional, but helpful for complex features
+
+**Updating acceptance criteria**: As you work, check off completed items by editing the bead:
+
+```bash
+br update <id> --description="...updated with [x] for completed items..."
+```
+
 <!-- end-br-agent-instructions -->
 
 ### Commit Conventions
