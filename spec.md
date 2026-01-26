@@ -180,29 +180,31 @@ botty is the control plane; viewers are replaceable skins.
 ### `botty view`
 
 ```bash
-botty view                 # defaults to tmux (v0: tmux only)
-botty view --mux=tmux
+botty view                    # panes mode (default)
+botty view --mode=windows     # windows/tabs mode
+botty view --label worker     # filter by label
 ```
 
-### tmux Mode (v0)
+### Layout Modes
 
-**Session**: Named `botty`, created or reused.
+**Panes mode** (default): All agents displayed as split panes in a single tmux window. Uses tiled layout, automatically adjusts when agents spawn/exit.
 
-**Layout**: Tiled (tmux's `tiled` layout), one pane per agent.
+**Windows mode**: Each agent gets its own tmux window. Navigate with standard tmux window commands (Ctrl-b n/p, Ctrl-b 0-9).
 
-**Pane content**: Each pane runs:
+### Auto-Resize
 
-```bash
-botty tail --replay <id>
-```
+When viewing, agents are automatically resized to match their tmux pane dimensions. This ensures TUI applications render correctly for the available space.
 
-This shows the current screen state immediately, then streams updates.
-Panes are titled with the agent ID.
+### tmux Integration
+
+**Session**: Named `botty`, created fresh on each `botty view` invocation.
+
+**Pane content**: Each pane runs `botty tail --replay <id>` which shows the current screen state immediately, then streams updates. Panes are titled with the agent ID.
 
 **Lifecycle**:
-- On startup: create panes for all existing agents
-- On `agent_spawned` event: add new pane
-- On `agent_exited` event: close pane
+- On startup: create panes/windows for all existing agents, resize to match
+- On `agent_spawned` event: add new pane/window
+- On `agent_exited` event: close pane/window
 - When all agents exit: close the tmux session
 
 **Interaction**: Panes are read-only viewers. To interact:
@@ -298,6 +300,10 @@ botty kill --label worker --term  # graceful SIGTERM
 - **Resource limits**: `--timeout` and `--max-output` for controlling agent lifecycle and memory usage.
 
 - **Spawn dependencies**: `--after` and `--wait-for` for declarative workflow sequencing without external orchestration.
+
+- **View modes**: Panes (split) vs windows (tabs) layout options for `botty view`.
+
+- **Auto-resize**: Agents automatically resized to match tmux pane dimensions when viewing.
 
 ---
 
