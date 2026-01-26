@@ -933,8 +933,11 @@ async fn pty_reader_task(manager: Arc<Mutex<AgentManager>>, event_tx: broadcast:
                         // PTY closed - child probably exited
                         if let Ok(Some(code)) = agent.pty.try_wait() {
                             agent.state = InternalAgentState::Exited { code };
-                            // Determine exit reason
-                            agent.exit_reason = Some(if agent.sigterm_sent {
+                            // Determine exit reason based on exit code:
+                            // - 128 + signal_num indicates killed by signal
+                            // - SIGTERM (15) -> 143, SIGKILL (9) -> 137
+                            agent.exit_reason = Some(if agent.sigterm_sent && (code == 143 || code == 137) {
+                                // Process was killed by our timeout signals
                                 ExitReason::Timeout
                             } else {
                                 ExitReason::Normal
@@ -957,8 +960,11 @@ async fn pty_reader_task(manager: Arc<Mutex<AgentManager>>, event_tx: broadcast:
                 if agent.is_running()
                     && let Ok(Some(code)) = agent.pty.try_wait() {
                         agent.state = InternalAgentState::Exited { code };
-                        // Determine exit reason
-                        agent.exit_reason = Some(if agent.sigterm_sent {
+                        // Determine exit reason based on exit code:
+                        // - 128 + signal_num indicates killed by signal
+                        // - SIGTERM (15) -> 143, SIGKILL (9) -> 137
+                        agent.exit_reason = Some(if agent.sigterm_sent && (code == 143 || code == 137) {
+                            // Process was killed by our timeout signals
                             ExitReason::Timeout
                         } else {
                             ExitReason::Normal

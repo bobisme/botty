@@ -80,11 +80,14 @@ impl Agent {
     }
 
     /// Check if the agent has exceeded its timeout.
+    /// Uses millisecond precision to avoid early triggering.
     #[must_use]
     pub fn is_timed_out(&self) -> bool {
         if let Some(limits) = self.limits {
             if let Some(timeout_secs) = limits.timeout {
-                return self.started_at.elapsed().as_secs() >= timeout_secs;
+                // Convert to millis for precision - timeout fires when elapsed >= timeout
+                let timeout_millis = timeout_secs * 1000;
+                return self.started_at.elapsed().as_millis() as u64 >= timeout_millis;
             }
         }
         false
@@ -95,7 +98,8 @@ impl Agent {
     #[must_use]
     pub fn should_sigkill(&self) -> bool {
         if let Some(sent_at) = self.sigterm_sent_at {
-            return sent_at.elapsed().as_secs() >= 5;
+            // 5 second grace period in millis for precision
+            return sent_at.elapsed().as_millis() >= 5000;
         }
         false
     }
