@@ -37,6 +37,12 @@ pub enum Request {
         /// Labels for grouping agents.
         #[serde(default)]
         labels: Vec<String>,
+        /// Auto-kill after this many seconds (None = no timeout).
+        #[serde(default)]
+        timeout: Option<u64>,
+        /// Stop recording transcript after this many bytes (None = unlimited).
+        #[serde(default)]
+        max_output: Option<u64>,
         /// Environment variables to set (KEY=VALUE pairs).
         #[serde(default)]
         env: Vec<String>,
@@ -176,6 +182,35 @@ pub struct AgentInfo {
     pub started_at: u64,
     /// Exit code if the agent has exited.
     pub exit_code: Option<i32>,
+    /// Exit reason (normal, timeout, killed).
+    #[serde(default)]
+    pub exit_reason: Option<ExitReason>,
+    /// Resource limits applied to this agent.
+    #[serde(default)]
+    pub limits: Option<ResourceLimits>,
+}
+
+/// Why an agent exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitReason {
+    /// Normal exit (process exited on its own).
+    Normal,
+    /// Killed by timeout.
+    Timeout,
+    /// Killed by user request.
+    Killed,
+}
+
+/// Resource limits for an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceLimits {
+    /// Timeout in seconds (None = no timeout).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+    /// Max transcript bytes (None = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<u64>,
 }
 
 /// Agent lifecycle state.
@@ -393,6 +428,8 @@ mod tests {
                 cols: 80,
                 name: None,
                 labels: vec!["worker".into()],
+                timeout: Some(60),
+                max_output: Some(1024 * 1024),
                 env: vec![],
                 env_clear: false,
             },
@@ -460,6 +497,11 @@ mod tests {
                     size: (24, 80),
                     started_at: 1706140800000,
                     exit_code: None,
+                    exit_reason: None,
+                    limits: Some(ResourceLimits {
+                        timeout: Some(60),
+                        max_output: None,
+                    }),
                 }],
             },
             Response::Output {

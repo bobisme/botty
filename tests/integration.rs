@@ -82,6 +82,8 @@ async fn test_spawn_and_list() {
             cols: 80,
             name: None,
             labels: vec![],
+            timeout: None,
+            max_output: None,
             env: vec![],
             env_clear: false,
         })
@@ -149,6 +151,8 @@ async fn test_spawn_send_snapshot() {
             cols: 80,
             name: None,
             labels: vec![],
+            timeout: None,
+            max_output: None,
             env: vec![],
             env_clear: false,
         })
@@ -276,6 +280,8 @@ async fn test_screen_cursor_movement() {
             cols: 80,
             name: None,
             labels: vec![],
+            timeout: None,
+            max_output: None,
             env: vec![],
             env_clear: false,
         })
@@ -350,6 +356,8 @@ async fn test_transcript_tail() {
             cols: 80,
             name: None,
             labels: vec![],
+            timeout: None,
+            max_output: None,
             env: vec![],
             env_clear: false,
         })
@@ -422,6 +430,8 @@ async fn test_attach_and_detach() {
             cols: 80,
             name: None,
             labels: vec![],
+            timeout: None,
+            max_output: None,
             env: vec![],
             env_clear: false,
         })
@@ -515,6 +525,8 @@ async fn test_attach_readonly_mode() {
             cols: 80,
             name: None,
             labels: vec![],
+            timeout: None,
+            max_output: None,
             env: vec![],
             env_clear: false,
         })
@@ -636,6 +648,8 @@ async fn test_attach_receives_output() {
             cols: 80,
             name: None,
             labels: vec![],
+            timeout: None,
+            max_output: None,
             env: vec![],
             env_clear: false,
         })
@@ -733,6 +747,8 @@ async fn test_attach_agent_exit() {
             cols: 80,
             name: None,
             labels: vec![],
+            timeout: None,
+            max_output: None,
             env: vec![],
             env_clear: false,
         })

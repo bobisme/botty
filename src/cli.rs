@@ -82,6 +82,14 @@ pub enum Command {
         #[arg(long, short)]
         label: Vec<String>,
 
+        /// Auto-kill agent after this many seconds. Sends SIGTERM first, then SIGKILL after 5s grace.
+        #[arg(long, short)]
+        timeout: Option<u64>,
+
+        /// Stop recording transcript after this many bytes (e.g., 1048576 for 1MB).
+        #[arg(long)]
+        max_output: Option<u64>,
+
         /// Environment variables (KEY=VALUE format, can be repeated).
         #[arg(long, short, value_name = "KEY=VALUE")]
         env: Vec<String>,

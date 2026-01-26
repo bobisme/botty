@@ -130,6 +130,8 @@ async fn run_doctor(
             cols: 80,
             name: Some("__doctor_test__".to_string()),
             labels: vec![],
+            timeout: None,
+            max_output: None,
             env: vec![],
             env_clear: false,
         })
@@ -197,8 +199,8 @@ async fn run_client(
     let mut client = Client::new(socket_path);
 
     match command {
-        Command::Spawn { rows, cols, name, label, env, env_clear, cmd } => {
-            let request = Request::Spawn { cmd, rows, cols, name, labels: label, env, env_clear };
+        Command::Spawn { rows, cols, name, label, timeout, max_output, env, env_clear, cmd } => {
+            let request = Request::Spawn { cmd, rows, cols, name, labels: label, timeout, max_output, env, env_clear };
             let response = client.request(request).await?;
 
             match response {
@@ -235,7 +237,7 @@ async fn run_client(
                         let json_agents: Vec<_> = agents
                             .iter()
                             .map(|a| {
-                                serde_json::json!({
+                                let mut obj = serde_json::json!({
                                     "id": a.id,
                                     "pid": a.pid,
                                     "state": match a.state {
@@ -246,7 +248,23 @@ async fn run_client(
                                     "labels": a.labels,
                                     "size": { "rows": a.size.0, "cols": a.size.1 },
                                     "exit_code": a.exit_code,
-                                })
+                                });
+                                // Include exit_reason if present
+                                if let Some(reason) = &a.exit_reason {
+                                    obj["exit_reason"] = serde_json::json!(match reason {
+                                        botty::ExitReason::Normal => "normal",
+                                        botty::ExitReason::Timeout => "timeout",
+                                        botty::ExitReason::Killed => "killed",
+                                    });
+                                }
+                                // Include limits if present
+                                if let Some(limits) = &a.limits {
+                                    obj["limits"] = serde_json::json!({
+                                        "timeout": limits.timeout,
+                                        "max_output": limits.max_output,
+                                    });
+                                }
+                                obj
                             })
                             .collect();
                         println!("{}", serde_json::to_string(&json_agents)?);
@@ -640,6 +658,8 @@ async fn run_client(
                 cols,
                 name: None,
                 labels: vec![],
+                timeout: None,
+                max_output: None,
                 env: vec![],
                 env_clear: false,
             };

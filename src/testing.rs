@@ -101,6 +101,8 @@ impl TestHarness {
             cols,
             name: None,
             labels: vec![],
+            timeout: None,
+            max_output: None,
             env: vec![],
             env_clear: false,
         };

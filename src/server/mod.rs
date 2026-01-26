@@ -26,7 +26,7 @@ pub use screen::Screen;
 pub use transcript::Transcript;
 
 use crate::protocol::{
-    AgentInfo, AgentState, AttachEndReason, DumpFormat, Event, Request, Response, TranscriptEntry,
+    AgentInfo, AgentState, AttachEndReason, DumpFormat, Event, ExitReason, Request, Response, TranscriptEntry,
 };
 use crate::pty;
 use nix::sys::signal::Signal;
@@ -289,7 +289,7 @@ async fn handle_request(
     match request {
         Request::Ping => Response::Pong,
 
-        Request::Spawn { cmd, rows, cols, name, labels, env, env_clear } => {
+        Request::Spawn { cmd, rows, cols, name, labels, timeout, max_output, env, env_clear } => {
             if cmd.is_empty() {
                 return Response::error("command is empty");
             }
@@ -307,6 +307,13 @@ async fn handle_request(
                     }
                 })
                 .collect();
+
+            // Build resource limits if any are specified
+            let limits = if timeout.is_some() || max_output.is_some() {
+                Some(crate::protocol::ResourceLimits { timeout, max_output })
+            } else {
+                None
+            };
 
             // Validate and resolve agent ID
             let mut mgr = manager.lock().await;
@@ -344,9 +351,9 @@ async fn handle_request(
                         mgr.remove(&id);
                     }
                     let pid = pty_process.pid.as_raw() as u32;
-                    let agent = Agent::new(id.clone(), cmd.clone(), labels.clone(), pty_process, rows, cols);
+                    let agent = Agent::new(id.clone(), cmd.clone(), labels.clone(), limits, pty_process, rows, cols);
                     mgr.add(agent);
-                    info!(%id, %pid, ?labels, "Spawned agent");
+                    info!(%id, %pid, ?labels, ?limits, "Spawned agent");
                     
                     // Publish spawn event
                     let _ = event_tx.send(Event::AgentSpawned {
@@ -387,6 +394,8 @@ async fn handle_request(
                         size: agent.screen.size(),
                         started_at,
                         exit_code: agent.exit_code(),
+                        exit_reason: agent.exit_reason,
+                        limits: agent.limits,
                     }
                 })
                 .collect();
@@ -882,6 +891,21 @@ async fn pty_reader_task(manager: Arc<Mutex<AgentManager>>, event_tx: broadcast:
                     continue;
                 }
 
+                // Check for timeout
+                if agent.is_timed_out() {
+                    if !agent.sigterm_sent {
+                        // First, send SIGTERM for graceful shutdown
+                        info!(%id, "Agent timeout - sending SIGTERM");
+                        let _ = agent.pty.signal(Signal::SIGTERM);
+                        agent.sigterm_sent = true;
+                        agent.sigterm_sent_at = Some(std::time::Instant::now());
+                    } else if agent.should_sigkill() {
+                        // Grace period expired, send SIGKILL
+                        info!(%id, "Agent timeout grace period expired - sending SIGKILL");
+                        let _ = agent.pty.signal(Signal::SIGKILL);
+                    }
+                }
+
                 // Try to read from the PTY master
                 let fd = agent.pty.master_fd();
                 let mut buf = [0u8; 4096];
@@ -909,7 +933,13 @@ async fn pty_reader_task(manager: Arc<Mutex<AgentManager>>, event_tx: broadcast:
                         // PTY closed - child probably exited
                         if let Ok(Some(code)) = agent.pty.try_wait() {
                             agent.state = InternalAgentState::Exited { code };
-                            info!(%id, %code, "Agent exited");
+                            // Determine exit reason
+                            agent.exit_reason = Some(if agent.sigterm_sent {
+                                ExitReason::Timeout
+                            } else {
+                                ExitReason::Normal
+                            });
+                            info!(%id, %code, exit_reason = ?agent.exit_reason, "Agent exited");
                             
                             // Publish exit event
                             let _ = event_tx.send(Event::AgentExited {
@@ -927,7 +957,13 @@ async fn pty_reader_task(manager: Arc<Mutex<AgentManager>>, event_tx: broadcast:
                 if agent.is_running()
                     && let Ok(Some(code)) = agent.pty.try_wait() {
                         agent.state = InternalAgentState::Exited { code };
-                        info!(%id, %code, "Agent exited");
+                        // Determine exit reason
+                        agent.exit_reason = Some(if agent.sigterm_sent {
+                            ExitReason::Timeout
+                        } else {
+                            ExitReason::Normal
+                        });
+                        info!(%id, %code, exit_reason = ?agent.exit_reason, "Agent exited");
                         
                         // Publish exit event
                         let _ = event_tx.send(Event::AgentExited {

@@ -2,6 +2,7 @@
 
 use super::screen::Screen;
 use super::transcript::Transcript;
+use crate::protocol::{ExitReason, ResourceLimits};
 use crate::pty::PtyProcess;
 use std::time::Instant;
 
@@ -24,6 +25,8 @@ pub struct Agent {
     pub pty: PtyProcess,
     /// Current state.
     pub state: AgentState,
+    /// Why the agent exited (if exited).
+    pub exit_reason: Option<ExitReason>,
     /// When the agent was started.
     pub started_at: Instant,
     /// Transcript buffer.
@@ -34,6 +37,12 @@ pub struct Agent {
     /// When attached, the background `pty_reader_task` should skip this agent
     /// since the attach bridge handles I/O directly.
     pub attached: bool,
+    /// Resource limits for this agent.
+    pub limits: Option<ResourceLimits>,
+    /// Whether SIGTERM has been sent (for timeout grace period).
+    pub sigterm_sent: bool,
+    /// When SIGTERM was sent (for tracking grace period).
+    pub sigterm_sent_at: Option<Instant>,
 }
 
 impl Agent {
@@ -43,21 +52,52 @@ impl Agent {
         id: String,
         command: Vec<String>,
         labels: Vec<String>,
+        limits: Option<ResourceLimits>,
         pty: PtyProcess,
         rows: u16,
         cols: u16,
     ) -> Self {
+        // Use max_output limit for transcript size, or default to 1MB
+        let transcript_size = limits
+            .and_then(|l| l.max_output)
+            .map_or(1024 * 1024, |m| m as usize);
+
         Self {
             id,
             command,
             labels,
             pty,
             state: AgentState::Running,
+            exit_reason: None,
             started_at: Instant::now(),
-            transcript: Transcript::new(1024 * 1024), // 1MB default
+            transcript: Transcript::new(transcript_size),
             screen: Screen::new(rows, cols),
             attached: false,
+            limits,
+            sigterm_sent: false,
+            sigterm_sent_at: None,
         }
+    }
+
+    /// Check if the agent has exceeded its timeout.
+    #[must_use]
+    pub fn is_timed_out(&self) -> bool {
+        if let Some(limits) = self.limits {
+            if let Some(timeout_secs) = limits.timeout {
+                return self.started_at.elapsed().as_secs() >= timeout_secs;
+            }
+        }
+        false
+    }
+
+    /// Check if SIGKILL should be sent (SIGTERM grace period expired).
+    /// Grace period is 5 seconds after SIGTERM.
+    #[must_use]
+    pub fn should_sigkill(&self) -> bool {
+        if let Some(sent_at) = self.sigterm_sent_at {
+            return sent_at.elapsed().as_secs() >= 5;
+        }
+        false
     }
 
     /// Check if the agent has all the specified labels.
