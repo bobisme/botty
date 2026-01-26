@@ -184,6 +184,11 @@ async fn run_client(
         return run_events_command(socket_path, filter, output).await;
     }
 
+    // Subscribe command streams output from agents
+    if let Command::Subscribe { id, label, prefix, format } = command {
+        return run_subscribe_command(socket_path, id, label, prefix, format).await;
+    }
+
     // View command manages tmux session
     if let Command::View { mux, label } = command {
         return run_view_command(socket_path, mux, label).await;
@@ -513,7 +518,7 @@ async fn run_client(
         }
 
         // These commands are handled before this match
-        Command::Attach { .. } | Command::Server { .. } | Command::Doctor | Command::Events { .. } | Command::View { .. } => {
+        Command::Attach { .. } | Command::Server { .. } | Command::Doctor | Command::Events { .. } | Command::Subscribe { .. } | Command::View { .. } => {
             unreachable!("handled above")
         }
 
@@ -890,6 +895,148 @@ async fn run_events_command(
                 _ => {
                     // Ignore other responses
                 }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_subscribe_command(
+    socket_path: std::path::PathBuf,
+    ids: Vec<String>,
+    labels: Vec<String>,
+    prefix: bool,
+    format: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use botty::protocol::Event;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    // Must specify at least one filter
+    if ids.is_empty() && labels.is_empty() {
+        return Err("must specify at least one --id or --label to subscribe to".into());
+    }
+
+    // Connect to server (don't auto-start - subscriptions are useless with no agents)
+    let stream = UnixStream::connect(&socket_path).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    // If we have labels, first get the list of matching agent IDs
+    // Then subscribe to events for those specific IDs
+    let mut filter_ids = ids.clone();
+    
+    if !labels.is_empty() {
+        // Get current agents matching the labels
+        let list_request = Request::List { labels: labels.clone() };
+        let mut json = serde_json::to_string(&list_request)?;
+        json.push('\n');
+        writer.write_all(json.as_bytes()).await?;
+        
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        
+        match serde_json::from_str::<Response>(&line)? {
+            Response::Agents { agents } => {
+                for agent in agents {
+                    if !filter_ids.contains(&agent.id) {
+                        filter_ids.push(agent.id);
+                    }
+                }
+            }
+            Response::Error { message } => return Err(message.into()),
+            _ => return Err("unexpected response to list".into()),
+        }
+        line.clear();
+    }
+
+    // Subscribe to events (include output, filter to our agents)
+    let request = Request::Events {
+        filter: filter_ids.clone(),
+        include_output: true,
+    };
+    let mut json = serde_json::to_string(&request)?;
+    json.push('\n');
+    writer.write_all(json.as_bytes()).await?;
+
+    // Process events
+    let mut line = String::new();
+    let jsonl_format = format == "jsonl";
+    
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 {
+            // Server disconnected
+            break;
+        }
+
+        if let Ok(response) = serde_json::from_str::<Response>(&line) {
+            match response {
+                Response::Event(Event::AgentOutput { id, data }) => {
+                    if jsonl_format {
+                        // JSONL format: emit JSON object per output chunk
+                        let json_out = serde_json::json!({
+                            "agent": id,
+                            "data": base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD,
+                                &data
+                            ),
+                        });
+                        println!("{}", serde_json::to_string(&json_out)?);
+                    } else if prefix {
+                        // Prefixed raw output: [agent-id] data
+                        // Split by newlines to prefix each line
+                        let text = String::from_utf8_lossy(&data);
+                        for chunk in text.split_inclusive('\n') {
+                            print!("[{id}] {chunk}");
+                        }
+                        std::io::Write::flush(&mut std::io::stdout())?;
+                    } else {
+                        // Raw output
+                        std::io::Write::write_all(&mut std::io::stdout(), &data)?;
+                        std::io::Write::flush(&mut std::io::stdout())?;
+                    }
+                }
+                Response::Event(Event::AgentSpawned { id, labels: agent_labels, .. }) => {
+                    // If we're filtering by labels and a new agent matches, add it to our filter
+                    if !labels.is_empty() && labels.iter().all(|l| agent_labels.contains(l)) {
+                        if !filter_ids.contains(&id) {
+                            filter_ids.push(id.clone());
+                            // Note: We can't dynamically update the filter on existing connection
+                            // The new agent will be picked up if we reconnect
+                            eprintln!("[subscribe] new agent matches labels: {}", id);
+                        }
+                    }
+                }
+                Response::Event(Event::AgentExited { id, exit_code }) => {
+                    if jsonl_format {
+                        let json_out = serde_json::json!({
+                            "agent": id,
+                            "event": "exited",
+                            "exit_code": exit_code,
+                        });
+                        println!("{}", serde_json::to_string(&json_out)?);
+                    } else if prefix {
+                        if let Some(code) = exit_code {
+                            eprintln!("[{id}] exited with code {code}");
+                        } else {
+                            eprintln!("[{id}] exited");
+                        }
+                    }
+                    // Remove from filter
+                    filter_ids.retain(|i| i != &id);
+                    
+                    // If no more agents to watch, exit
+                    if filter_ids.is_empty() {
+                        break;
+                    }
+                }
+                Response::Error { message } => {
+                    return Err(message.into());
+                }
+                _ => {}
             }
         }
     }

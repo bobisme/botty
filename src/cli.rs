@@ -285,6 +285,28 @@ pub enum Command {
         output: bool,
     },
 
+    /// Subscribe to agent output streams.
+    ///
+    /// Streams raw output from one or more agents. Useful for watching workers
+    /// from an orchestrating agent. Use --prefix for multiplexed viewing.
+    Subscribe {
+        /// Agent IDs to subscribe to (can be repeated).
+        #[arg(long, short)]
+        id: Vec<String>,
+
+        /// Subscribe to agents with these labels (can be repeated).
+        #[arg(long, short)]
+        label: Vec<String>,
+
+        /// Prefix each output chunk with [agent-id] for multiplexed viewing.
+        #[arg(long, short)]
+        prefix: bool,
+
+        /// Output format: raw (default) or jsonl.
+        #[arg(long, default_value = "raw")]
+        format: String,
+    },
+
     /// Launch a tmux viewer showing all agents.
     View {
         /// Multiplexer to use (currently only tmux is supported).
