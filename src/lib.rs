@@ -21,4 +21,4 @@ pub use client::{default_socket_path, Client, ClientError};
 pub use protocol::{AgentInfo, AgentState, DumpFormat, Event, ExitReason, Request, ResourceLimits, Response};
 pub use server::{Server, ServerError};
 pub use testing::{AgentHandle, TestError, TestHarness};
-pub use view::{TmuxView, ViewError};
+pub use view::{TmuxView, ViewError, ViewMode};

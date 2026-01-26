@@ -192,8 +192,8 @@ async fn run_client(
     }
 
     // View command manages tmux session
-    if let Command::View { mux, label } = command {
-        return run_view_command(socket_path, mux, label).await;
+    if let Command::View { mux, mode, label } = command {
+        return run_view_command(socket_path, mux, mode, label).await;
     }
 
     // Clone socket_path before moving it to client (needed for dependency waiting)
@@ -1074,8 +1074,10 @@ async fn run_subscribe_command(
 async fn run_view_command(
     socket_path: std::path::PathBuf,
     mux: String,
+    mode: String,
     labels: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use botty::ViewMode;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
 
@@ -1084,6 +1086,9 @@ async fn run_view_command(
         return Err(ViewError::UnsupportedMux(mux).into());
     }
 
+    // Parse view mode
+    let view_mode = ViewMode::from_str(&mode)?;
+
     // Check tmux is available
     TmuxView::check_tmux()?;
 
@@ -1091,7 +1096,7 @@ async fn run_view_command(
     let botty_path = std::env::current_exe()
         .map_or_else(|_| "botty".to_string(), |p| p.to_string_lossy().to_string());
 
-    let mut view = TmuxView::new(botty_path);
+    let mut view = TmuxView::with_mode(botty_path, view_mode);
 
     // Connect to server to get current agents
     let stream = UnixStream::connect(&socket_path).await?;
@@ -1130,6 +1135,16 @@ async fn run_view_command(
         view.add_pane(agent_id)?;
     }
 
+    // Resize agents to match their pane sizes
+    if !current_agents.is_empty() {
+        // Small delay to let tmux settle layout
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        
+        if let Err(e) = resize_agents_to_panes(&socket_path, &view).await {
+            tracing::warn!("Failed to resize agents: {}", e);
+        }
+    }
+
     // If no agents, show a message
     if current_agents.is_empty() {
         eprintln!("No agents running. Waiting for agents to spawn...");
@@ -1139,7 +1154,7 @@ async fn run_view_command(
     let socket_path_clone = socket_path.clone();
     let existing_agents = current_agents.clone();
     let event_handle = tokio::spawn(async move {
-        if let Err(e) = run_view_event_loop(socket_path_clone, existing_agents).await {
+        if let Err(e) = run_view_event_loop(socket_path_clone, existing_agents, view_mode).await {
             tracing::warn!("Event loop error: {}", e);
         }
     });
@@ -1160,6 +1175,7 @@ async fn run_view_command(
 async fn run_view_event_loop(
     socket_path: std::path::PathBuf,
     existing_agents: Vec<String>,
+    mode: botty::ViewMode,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use botty::protocol::Event;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1173,7 +1189,7 @@ async fn run_view_event_loop(
     let botty_path = std::env::current_exe()
         .map_or_else(|_| "botty".to_string(), |p| p.to_string_lossy().to_string());
 
-    let mut view = TmuxView::new(botty_path);
+    let mut view = TmuxView::with_mode(botty_path, mode);
     
     // Initialize with existing agents so we track them properly
     for agent_id in existing_agents {
@@ -1368,4 +1384,50 @@ async fn wait_for_dependencies(
             return Ok(());
         }
     }
+}
+
+/// Resize all agents to match their tmux pane sizes.
+async fn resize_agents_to_panes(
+    socket_path: &std::path::Path,
+    view: &TmuxView,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let pane_sizes = view.get_pane_sizes()?;
+    
+    if pane_sizes.is_empty() {
+        return Ok(());
+    }
+
+    let stream = UnixStream::connect(socket_path).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    for (agent_id, (rows, cols)) in pane_sizes {
+        let request = Request::Resize {
+            id: agent_id.clone(),
+            rows,
+            cols,
+        };
+        
+        let mut json = serde_json::to_string(&request)?;
+        json.push('\n');
+        writer.write_all(json.as_bytes()).await?;
+
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+
+        match serde_json::from_str::<Response>(&line)? {
+            Response::Ok => {
+                tracing::debug!("Resized {} to {}x{}", agent_id, rows, cols);
+            }
+            Response::Error { message } => {
+                tracing::warn!("Failed to resize {}: {}", agent_id, message);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }

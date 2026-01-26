@@ -330,6 +330,11 @@ pub enum Command {
         #[arg(long, default_value = "tmux")]
         mux: String,
 
+        /// Layout mode: "panes" (default) shows all agents in split panes,
+        /// "windows" creates a separate tmux window per agent for tab-style navigation.
+        #[arg(long, default_value = "panes")]
+        mode: String,
+
         /// Filter to agents with these labels (can be repeated, matches agents with ALL labels).
         #[arg(long, short)]
         label: Vec<String>,
