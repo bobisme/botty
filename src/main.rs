@@ -196,6 +196,11 @@ async fn run_client(
         return run_view_command(socket_path, mux, mode, label).await;
     }
 
+    // ResizePanes command (called from tmux hook)
+    if let Command::ResizePanes { mode } = command {
+        return run_resize_panes_command(socket_path, mode).await;
+    }
+
     // Clone socket_path before moving it to client (needed for dependency waiting)
     let socket_path_ref = socket_path.clone();
     let mut client = Client::new(socket_path);
@@ -543,7 +548,7 @@ async fn run_client(
         }
 
         // These commands are handled before this match
-        Command::Attach { .. } | Command::Server { .. } | Command::Doctor | Command::Events { .. } | Command::Subscribe { .. } | Command::View { .. } => {
+        Command::Attach { .. } | Command::Server { .. } | Command::Doctor | Command::Events { .. } | Command::Subscribe { .. } | Command::View { .. } | Command::ResizePanes { .. } => {
             unreachable!("handled above")
         }
 
@@ -1130,6 +1135,9 @@ async fn run_view_command(
     }
     view.create_session()?;
 
+    // Set up tmux hook for dynamic resizing when panes change
+    setup_resize_hook(&view, &mode)?;
+
     // Create panes for existing agents
     for agent_id in &current_agents {
         view.add_pane(agent_id)?;
@@ -1137,8 +1145,8 @@ async fn run_view_command(
 
     // Resize agents to match their pane sizes
     if !current_agents.is_empty() {
-        // Small delay to let tmux settle layout
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Delay to let tmux finish creating panes and settling layout
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         
         if let Err(e) = resize_agents_to_panes(&socket_path, &view).await {
             tracing::warn!("Failed to resize agents: {}", e);
@@ -1386,6 +1394,42 @@ async fn wait_for_dependencies(
     }
 }
 
+/// Set up tmux hooks to resize agents when panes change.
+fn setup_resize_hook(view: &TmuxView, mode: &str) -> Result<(), ViewError> {
+    use std::process::Command;
+    
+    let botty_path = view.botty_path();
+    let session_name = "botty";
+    
+    // Hook command: call botty resize-panes when any pane is resized
+    // The hook runs asynchronously so it won't block tmux
+    let hook_cmd = format!("{} resize-panes --mode={}", botty_path, mode);
+    
+    // Set hook for after-resize-pane (fires when panes are resized)
+    let _ = Command::new("tmux")
+        .args([
+            "set-hook",
+            "-t",
+            session_name,
+            "after-resize-pane",
+            &format!("run-shell -b '{}'", hook_cmd),
+        ])
+        .status();
+    
+    // Also hook window-layout-changed (fires when layout changes, e.g., after split/close)
+    let _ = Command::new("tmux")
+        .args([
+            "set-hook",
+            "-t",
+            session_name,
+            "window-layout-changed",
+            &format!("run-shell -b '{}'", hook_cmd),
+        ])
+        .status();
+
+    Ok(())
+}
+
 /// Resize all agents to match their tmux pane sizes.
 async fn resize_agents_to_panes(
     socket_path: &std::path::Path,
@@ -1426,6 +1470,78 @@ async fn resize_agents_to_panes(
                 tracing::warn!("Failed to resize {}: {}", agent_id, message);
             }
             _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle resize-panes command (called from tmux hook).
+async fn run_resize_panes_command(
+    socket_path: std::path::PathBuf,
+    mode: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use botty::ViewMode;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let view_mode = ViewMode::from_str(&mode)?;
+    
+    // Get path to our binary (not used for botty_path in TmuxView, but needed for consistency)
+    let botty_path = std::env::current_exe()
+        .map_or_else(|_| "botty".to_string(), |p| p.to_string_lossy().to_string());
+
+    // Create a view instance to query pane sizes
+    let mut view = TmuxView::with_mode(botty_path, view_mode);
+    
+    // First, get the list of running agents to populate active_panes
+    let stream = UnixStream::connect(&socket_path).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    let list_request = Request::List { labels: vec![] };
+    let mut json = serde_json::to_string(&list_request)?;
+    json.push('\n');
+    writer.write_all(json.as_bytes()).await?;
+
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+
+    let agents: Vec<String> = match serde_json::from_str::<Response>(&line)? {
+        Response::Agents { agents } => agents
+            .into_iter()
+            .filter(|a| a.state == botty::AgentState::Running)
+            .map(|a| a.id)
+            .collect(),
+        Response::Error { message } => return Err(message.into()),
+        _ => return Err("unexpected response to list".into()),
+    };
+
+    // Mark agents as having panes
+    for agent_id in &agents {
+        view.mark_pane_exists(agent_id);
+    }
+
+    // Get pane sizes and resize
+    let pane_sizes = view.get_pane_sizes()?;
+    
+    for (agent_id, (rows, cols)) in pane_sizes {
+        let request = Request::Resize {
+            id: agent_id.clone(),
+            rows,
+            cols,
+        };
+        
+        let mut json = serde_json::to_string(&request)?;
+        json.push('\n');
+        writer.write_all(json.as_bytes()).await?;
+
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+
+        // Just log, don't fail on individual resize errors
+        if let Ok(Response::Ok) = serde_json::from_str::<Response>(&line) {
+            tracing::debug!("Resized {} to {}x{}", agent_id, rows, cols);
         }
     }
 

@@ -353,6 +353,15 @@ pub enum Command {
         #[arg(long)]
         cols: u16,
     },
+
+    /// Resize all agents in a botty view session to match their pane sizes.
+    /// This is typically called from a tmux hook, not manually.
+    #[command(hide = true)]
+    ResizePanes {
+        /// Layout mode used by the view session.
+        #[arg(long, default_value = "panes")]
+        mode: String,
+    },
 }
 
 #[cfg(test)]

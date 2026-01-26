@@ -373,35 +373,72 @@ impl TmuxView {
         self.active_panes.insert(agent_id.to_string());
     }
 
-    /// Get the sizes of all panes, keyed by agent ID (pane title).
+    /// Get the sizes of all panes/windows, keyed by agent ID.
+    /// In panes mode: uses pane title
+    /// In windows mode: uses window name
     /// Returns a map of agent_id -> (rows, cols).
     pub fn get_pane_sizes(&self) -> Result<std::collections::HashMap<String, (u16, u16)>, ViewError> {
         let mut sizes = std::collections::HashMap::new();
 
-        // Format: pane_title:rows:cols
-        #[allow(clippy::literal_string_with_formatting_args)]
-        let format_str = "#{pane_title}:#{pane_height}:#{pane_width}";
+        match self.mode {
+            ViewMode::Panes => {
+                // In panes mode, use pane title to identify agents
+                #[allow(clippy::literal_string_with_formatting_args)]
+                let format_str = "#{pane_title}:#{pane_height}:#{pane_width}";
 
-        let output = Command::new("tmux")
-            .args([
-                "list-panes",
-                "-s", // all panes in session
-                "-t",
-                &self.session_name,
-                "-F",
-                format_str,
-            ])
-            .output()?;
+                let output = Command::new("tmux")
+                    .args([
+                        "list-panes",
+                        "-t",
+                        &format!("{}:agents", self.session_name),
+                        "-F",
+                        format_str,
+                    ])
+                    .output()?;
 
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split(':').collect();
-                if parts.len() >= 3 {
-                    let title = parts[0];
-                    if let (Ok(rows), Ok(cols)) = (parts[1].parse::<u16>(), parts[2].parse::<u16>()) {
-                        if self.active_panes.contains(title) {
-                            sizes.insert(title.to_string(), (rows, cols));
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        let parts: Vec<&str> = line.split(':').collect();
+                        if parts.len() >= 3 {
+                            let title = parts[0];
+                            if let (Ok(rows), Ok(cols)) = (parts[1].parse::<u16>(), parts[2].parse::<u16>()) {
+                                if self.active_panes.contains(title) {
+                                    sizes.insert(title.to_string(), (rows, cols));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ViewMode::Windows => {
+                // In windows mode, each agent has its own window
+                // Use window name and get the pane size of the single pane in each window
+                #[allow(clippy::literal_string_with_formatting_args)]
+                let format_str = "#{window_name}:#{pane_height}:#{pane_width}";
+
+                let output = Command::new("tmux")
+                    .args([
+                        "list-panes",
+                        "-s", // all panes in all windows
+                        "-t",
+                        &self.session_name,
+                        "-F",
+                        format_str,
+                    ])
+                    .output()?;
+
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        let parts: Vec<&str> = line.split(':').collect();
+                        if parts.len() >= 3 {
+                            let window_name = parts[0];
+                            if let (Ok(rows), Ok(cols)) = (parts[1].parse::<u16>(), parts[2].parse::<u16>()) {
+                                if self.active_panes.contains(window_name) {
+                                    sizes.insert(window_name.to_string(), (rows, cols));
+                                }
+                            }
                         }
                     }
                 }
