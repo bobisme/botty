@@ -98,6 +98,15 @@ pub enum Command {
         #[arg(long)]
         env_clear: bool,
 
+        /// Wait for agent(s) to exit before spawning (can be repeated).
+        #[arg(long)]
+        after: Vec<String>,
+
+        /// Wait for agent to output a pattern before spawning.
+        /// Format: "agent-id" or "agent-id:regex" (e.g., "setup:ready" waits for "ready" in setup's output).
+        #[arg(long)]
+        wait_for: Vec<String>,
+
         /// Command to run (after --).
         #[arg(last = true, required = true)]
         cmd: Vec<String>,

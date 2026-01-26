@@ -196,10 +196,17 @@ async fn run_client(
         return run_view_command(socket_path, mux, label).await;
     }
 
+    // Clone socket_path before moving it to client (needed for dependency waiting)
+    let socket_path_ref = socket_path.clone();
     let mut client = Client::new(socket_path);
 
     match command {
-        Command::Spawn { rows, cols, name, label, timeout, max_output, env, env_clear, cmd } => {
+        Command::Spawn { rows, cols, name, label, timeout, max_output, env, env_clear, after, wait_for, cmd } => {
+            // Wait for dependencies before spawning
+            if !after.is_empty() || !wait_for.is_empty() {
+                wait_for_dependencies(&socket_path_ref, &after, &wait_for).await?;
+            }
+
             let request = Request::Spawn { cmd, rows, cols, name, labels: label, timeout, max_output, env, env_clear };
             let response = client.request(request).await?;
 
@@ -1219,4 +1226,146 @@ async fn run_view_event_loop(
     }
 
     Ok(())
+}
+
+/// Wait for spawn dependencies before proceeding.
+///
+/// - `after`: Wait for these agents to exit
+/// - `wait_for`: Wait for pattern match in agent output. Format: "agent-id" or "agent-id:regex"
+async fn wait_for_dependencies(
+    socket_path: &std::path::Path,
+    after: &[String],
+    wait_for: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use botty::protocol::Event;
+    use regex::Regex;
+    use std::collections::{HashMap, HashSet};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    // Parse wait_for specs into (agent_id, optional_pattern)
+    let mut pattern_waits: HashMap<String, Option<Regex>> = HashMap::new();
+    for spec in wait_for {
+        if let Some((agent_id, pattern)) = spec.split_once(':') {
+            let regex = Regex::new(pattern)
+                .map_err(|e| format!("invalid pattern '{}': {}", pattern, e))?;
+            pattern_waits.insert(agent_id.to_string(), Some(regex));
+        } else {
+            // No pattern - wait for any output
+            pattern_waits.insert(spec.clone(), None);
+        }
+    }
+
+    // Track what we're still waiting for
+    let mut waiting_for_exit: HashSet<String> = after.iter().cloned().collect();
+    let mut waiting_for_pattern: HashMap<String, Option<Regex>> = pattern_waits;
+
+    // If nothing to wait for, return immediately
+    if waiting_for_exit.is_empty() && waiting_for_pattern.is_empty() {
+        return Ok(());
+    }
+
+    // First, check current state - some agents may have already exited
+    let stream = UnixStream::connect(socket_path).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    // List current agents
+    let list_request = Request::List { labels: vec![] };
+    let mut json = serde_json::to_string(&list_request)?;
+    json.push('\n');
+    writer.write_all(json.as_bytes()).await?;
+
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+
+    let agents: Vec<botty::AgentInfo> = match serde_json::from_str::<Response>(&line)? {
+        Response::Agents { agents } => agents,
+        Response::Error { message } => return Err(message.into()),
+        _ => return Err("unexpected response to list".into()),
+    };
+
+    // Check for already-exited agents in --after list
+    for agent in &agents {
+        if agent.state == botty::AgentState::Exited && waiting_for_exit.contains(&agent.id) {
+            tracing::debug!("Agent {} already exited", agent.id);
+            waiting_for_exit.remove(&agent.id);
+        }
+    }
+
+    // Validate that all referenced agents exist
+    let agent_ids: HashSet<_> = agents.iter().map(|a| a.id.as_str()).collect();
+    for id in &waiting_for_exit {
+        if !agent_ids.contains(id.as_str()) {
+            return Err(format!("--after: agent '{}' not found", id).into());
+        }
+    }
+    for id in waiting_for_pattern.keys() {
+        if !agent_ids.contains(id.as_str()) {
+            return Err(format!("--wait-for: agent '{}' not found", id).into());
+        }
+    }
+
+    // If all conditions already satisfied, we're done
+    if waiting_for_exit.is_empty() && waiting_for_pattern.is_empty() {
+        return Ok(());
+    }
+
+    // Subscribe to events to wait for remaining conditions
+    drop(reader);
+    drop(writer);
+
+    let stream = UnixStream::connect(socket_path).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    // Subscribe to events with output (needed for pattern matching)
+    let events_request = Request::Events {
+        filter: vec![], // All agents
+        include_output: !waiting_for_pattern.is_empty(),
+    };
+    let mut json = serde_json::to_string(&events_request)?;
+    json.push('\n');
+    writer.write_all(json.as_bytes()).await?;
+
+    // Wait for conditions
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).await? == 0 {
+            return Err("server closed connection while waiting for dependencies".into());
+        }
+
+        let response: Response = serde_json::from_str(&line)?;
+
+        match response {
+            Response::Event(Event::AgentExited { id, .. }) => {
+                if waiting_for_exit.remove(&id) {
+                    tracing::debug!("Dependency satisfied: {} exited", id);
+                }
+            }
+            Response::Event(Event::AgentOutput { id, data }) => {
+                if let Some(pattern_opt) = waiting_for_pattern.get(&id) {
+                    let output = String::from_utf8_lossy(&data);
+                    let matched = match pattern_opt {
+                        Some(regex) => regex.is_match(&output),
+                        None => true, // Any output matches
+                    };
+                    if matched {
+                        tracing::debug!("Dependency satisfied: {} matched pattern", id);
+                        waiting_for_pattern.remove(&id);
+                    }
+                }
+            }
+            Response::Error { message } => {
+                return Err(format!("error while waiting: {}", message).into());
+            }
+            _ => {}
+        }
+
+        // Check if all conditions satisfied
+        if waiting_for_exit.is_empty() && waiting_for_pattern.is_empty() {
+            tracing::debug!("All dependencies satisfied");
+            return Ok(());
+        }
+    }
 }
