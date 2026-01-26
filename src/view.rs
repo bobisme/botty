@@ -124,7 +124,12 @@ impl TmuxView {
             return Ok(());
         }
 
-        let tail_cmd = format!("{} tail --replay {}", self.botty_path, agent_id);
+        // Use attach --readonly instead of tail for proper TUI display.
+        // attach --readonly:
+        // 1. Sends initial screen render (full screen with colors/positioning)
+        // 2. Streams live PTY output in raw mode
+        // 3. Properly handles cursor positioning and scroll regions
+        let tail_cmd = format!("{} attach --readonly {}", self.botty_path, agent_id);
 
         match self.mode {
             ViewMode::Panes => self.add_pane_split(agent_id, &tail_cmd)?,
@@ -165,6 +170,17 @@ impl TmuxView {
                     agent_id,
                 ])
                 .status();
+            // Also set @agent_id pane option for auto-resize (immune to title overwrites)
+            let _ = Command::new("tmux")
+                .args([
+                    "set-option",
+                    "-p",
+                    "-t",
+                    &format!("{}:agents", self.session_name),
+                    "@agent_id",
+                    agent_id,
+                ])
+                .status();
         } else {
             // Split window and run tail command
             let status = Command::new("tmux")
@@ -188,6 +204,17 @@ impl TmuxView {
                     "-t",
                     &format!("{}:agents", self.session_name),
                     "-T",
+                    agent_id,
+                ])
+                .status();
+            // Also set @agent_id pane option for auto-resize (immune to title overwrites)
+            let _ = Command::new("tmux")
+                .args([
+                    "set-option",
+                    "-p",
+                    "-t",
+                    &format!("{}:agents", self.session_name),
+                    "@agent_id",
                     agent_id,
                 ])
                 .status();
@@ -227,6 +254,17 @@ impl TmuxView {
                     agent_id,
                 ])
                 .status();
+            // Set @agent_id pane option for auto-resize
+            let _ = Command::new("tmux")
+                .args([
+                    "set-option",
+                    "-p",
+                    "-t",
+                    &format!("{}:agents", self.session_name),
+                    "@agent_id",
+                    agent_id,
+                ])
+                .status();
         } else {
             // Create a new window
             let status = Command::new("tmux")
@@ -243,6 +281,17 @@ impl TmuxView {
             if !status.success() {
                 return Err(ViewError::TmuxFailed("failed to create window".into()));
             }
+            // Set @agent_id pane option for auto-resize
+            let _ = Command::new("tmux")
+                .args([
+                    "set-option",
+                    "-p",
+                    "-t",
+                    &format!("{}:{}", self.session_name, agent_id),
+                    "@agent_id",
+                    agent_id,
+                ])
+                .status();
         }
         Ok(())
     }
@@ -374,71 +423,38 @@ impl TmuxView {
     }
 
     /// Get the sizes of all panes/windows, keyed by agent ID.
-    /// In panes mode: uses pane title
-    /// In windows mode: uses window name
+    /// Uses @agent_id pane option which is immune to programs overwriting titles.
     /// Returns a map of agent_id -> (rows, cols).
     pub fn get_pane_sizes(&self) -> Result<std::collections::HashMap<String, (u16, u16)>, ViewError> {
         let mut sizes = std::collections::HashMap::new();
 
-        match self.mode {
-            ViewMode::Panes => {
-                // In panes mode, use pane title to identify agents
-                #[allow(clippy::literal_string_with_formatting_args)]
-                let format_str = "#{pane_title}:#{pane_height}:#{pane_width}";
+        // Use @agent_id pane option - immune to title overwrites by programs
+        #[allow(clippy::literal_string_with_formatting_args)]
+        let format_str = "#{@agent_id}:#{pane_height}:#{pane_width}";
 
-                let output = Command::new("tmux")
-                    .args([
-                        "list-panes",
-                        "-t",
-                        &format!("{}:agents", self.session_name),
-                        "-F",
-                        format_str,
-                    ])
-                    .output()?;
+        let session_window = format!("{}:agents", self.session_name);
+        let output = match self.mode {
+            ViewMode::Panes => Command::new("tmux")
+                .args(["list-panes", "-t", &session_window, "-F", format_str])
+                .output()?,
+            ViewMode::Windows => Command::new("tmux")
+                .args(["list-panes", "-s", "-t", &self.session_name, "-F", format_str])
+                .output()?,
+        };
 
-                if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    for line in stdout.lines() {
-                        let parts: Vec<&str> = line.split(':').collect();
-                        if parts.len() >= 3 {
-                            let title = parts[0];
-                            if let (Ok(rows), Ok(cols)) = (parts[1].parse::<u16>(), parts[2].parse::<u16>()) {
-                                if self.active_panes.contains(title) {
-                                    sizes.insert(title.to_string(), (rows, cols));
-                                }
-                            }
-                        }
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 3 {
+                    let agent_id = parts[0];
+                    // Skip if @agent_id is empty (pane not managed by us)
+                    if agent_id.is_empty() {
+                        continue;
                     }
-                }
-            }
-            ViewMode::Windows => {
-                // In windows mode, each agent has its own window
-                // Use window name and get the pane size of the single pane in each window
-                #[allow(clippy::literal_string_with_formatting_args)]
-                let format_str = "#{window_name}:#{pane_height}:#{pane_width}";
-
-                let output = Command::new("tmux")
-                    .args([
-                        "list-panes",
-                        "-s", // all panes in all windows
-                        "-t",
-                        &self.session_name,
-                        "-F",
-                        format_str,
-                    ])
-                    .output()?;
-
-                if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    for line in stdout.lines() {
-                        let parts: Vec<&str> = line.split(':').collect();
-                        if parts.len() >= 3 {
-                            let window_name = parts[0];
-                            if let (Ok(rows), Ok(cols)) = (parts[1].parse::<u16>(), parts[2].parse::<u16>()) {
-                                if self.active_panes.contains(window_name) {
-                                    sizes.insert(window_name.to_string(), (rows, cols));
-                                }
-                            }
+                    if let (Ok(rows), Ok(cols)) = (parts[1].parse::<u16>(), parts[2].parse::<u16>()) {
+                        if self.active_panes.contains(agent_id) {
+                            sizes.insert(agent_id.to_string(), (rows, cols));
                         }
                     }
                 }

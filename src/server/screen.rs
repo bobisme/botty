@@ -196,6 +196,34 @@ impl Screen {
         result
     }
 
+    /// Render the full screen as escape sequences suitable for initializing a terminal.
+    /// This outputs: clear screen, draw content with colors, position cursor.
+    /// Used by attach to initialize the display before streaming live updates.
+    #[must_use]
+    pub fn render_full_screen(&self) -> Vec<u8> {
+        use std::fmt::Write;
+
+        let mut result = String::new();
+
+        // Clear screen and position cursor home
+        // \e[2J = clear entire screen
+        // \e[H = cursor home (1,1)
+        result.push_str("\x1b[2J\x1b[H");
+
+        // Use contents_formatted() which correctly handles all formatting
+        // including wide characters, colors, etc.
+        result.push_str(&self.contents_formatted());
+
+        // Ensure we end with reset attributes
+        result.push_str("\x1b[0m");
+
+        // Position cursor where it should be
+        let (cursor_row, cursor_col) = self.parser.screen().cursor_position();
+        let _ = write!(result, "\x1b[{};{}H", cursor_row + 1, cursor_col + 1);
+
+        result.into_bytes()
+    }
+
     /// Get the cursor position (row, col), 0-indexed.
     #[must_use]
     pub fn cursor_position(&self) -> (u16, u16) {

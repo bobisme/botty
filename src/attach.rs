@@ -47,6 +47,8 @@ enum DetachState {
 
 /// Configuration for attach mode.
 pub struct AttachConfig {
+    /// Agent ID (needed for resize requests).
+    pub agent_id: String,
     /// Prefix key for detach (default: Ctrl+G = 0x07).
     pub detach_prefix: u8,
     /// Key after prefix to detach (default: 'd' = 0x64).
@@ -55,9 +57,11 @@ pub struct AttachConfig {
     pub readonly: bool,
 }
 
-impl Default for AttachConfig {
-    fn default() -> Self {
+impl AttachConfig {
+    /// Create a new config with the given agent ID.
+    pub fn new(agent_id: String) -> Self {
         Self {
+            agent_id,
             detach_prefix: 0x07, // Ctrl+G
             detach_key: b'd',
             readonly: false,
@@ -188,8 +192,20 @@ pub async fn run_attach(
         }
     }
 
-    let response: Response = serde_json::from_slice(&response_buf)
+    // Find the newline that terminates the JSON response
+    let newline_pos = response_buf.iter().position(|&b| b == b'\n')
+        .ok_or_else(|| AttachError::Protocol("no newline in response".to_string()))?;
+    
+    // Parse just the JSON part (up to and including newline)
+    let response: Response = serde_json::from_slice(&response_buf[..newline_pos])
         .map_err(|e| AttachError::Protocol(format!("invalid response: {e}")))?;
+
+    // Any bytes after the newline are initial screen data from the server
+    let mut initial_screen_data = if newline_pos + 1 < response_buf.len() {
+        response_buf[newline_pos + 1..].to_vec()
+    } else {
+        Vec::new()
+    };
 
     match response {
         Response::AttachStarted { id, size } => {
@@ -208,9 +224,58 @@ pub async fn run_attach(
         }
     }
 
-    // Enter raw mode
+    // Enter raw mode first so the initial screen renders correctly
     let _terminal_state = TerminalState::enter_raw_mode()?;
     info!("Entered raw mode. Press Ctrl+G then 'd' to detach.");
+
+    // Read any additional initial screen data that may arrive
+    // The server sends the screen render after the JSON response
+    // Keep reading until we get no more data (with short timeouts)
+    // Limit buffer size to prevent memory exhaustion (16MB should be enough for any screen)
+    const MAX_INITIAL_SCREEN_SIZE: usize = 16 * 1024 * 1024;
+    {
+        use std::time::Duration;
+        use tokio::time::timeout;
+        
+        let mut extra_buf = vec![0u8; 65536]; // Large buffer for screen data
+        
+        // Read in a loop until no more data arrives
+        // Use short timeouts to detect end of initial data
+        loop {
+            // Check size limit before reading more
+            if initial_screen_data.len() >= MAX_INITIAL_SCREEN_SIZE {
+                warn!("Initial screen data exceeded {} bytes, truncating", MAX_INITIAL_SCREEN_SIZE);
+                break;
+            }
+            
+            match timeout(Duration::from_millis(100), stream.read(&mut extra_buf)).await {
+                Ok(Ok(n)) if n > 0 => {
+                    initial_screen_data.extend_from_slice(&extra_buf[..n]);
+                    // If we got a full buffer, there might be more
+                    if n < extra_buf.len() {
+                        // Partial read - probably done, but try once more
+                        if let Ok(Ok(n2)) = timeout(Duration::from_millis(20), stream.read(&mut extra_buf)).await {
+                            if n2 > 0 {
+                                initial_screen_data.extend_from_slice(&extra_buf[..n2]);
+                            }
+                        }
+                        break;
+                    }
+                }
+                _ => break, // Timeout or error - done reading initial data
+            }
+        }
+    }
+
+    // Output any initial screen data
+    if !initial_screen_data.is_empty() {
+        info!("Outputting {} bytes of initial screen data", initial_screen_data.len());
+        use std::io::Write;
+        std::io::stdout().write_all(&initial_screen_data).map_err(AttachError::Io)?;
+        std::io::stdout().flush().map_err(AttachError::Io)?;
+    } else {
+        info!("No initial screen data received");
+    }
 
     // Run the I/O bridge
     let result = run_io_bridge(stream, &config).await;
@@ -221,12 +286,29 @@ pub async fn run_attach(
     result
 }
 
+/// Get terminal size from stdout
+fn get_terminal_size() -> Option<(u16, u16)> {
+    use nix::libc::{TIOCGWINSZ, winsize};
+    use std::os::unix::io::AsRawFd;
+    
+    let fd = std::io::stdout().as_raw_fd();
+    let mut ws: winsize = unsafe { std::mem::zeroed() };
+    
+    let result = unsafe { nix::libc::ioctl(fd, TIOCGWINSZ, &mut ws) };
+    if result == 0 && ws.ws_row > 0 && ws.ws_col > 0 {
+        Some((ws.ws_row, ws.ws_col))
+    } else {
+        None
+    }
+}
+
 /// Run the bidirectional I/O bridge.
 async fn run_io_bridge(
     stream: &mut UnixStream,
     config: &AttachConfig,
 ) -> Result<AttachEndReason, AttachError> {
     use tokio::io::{stdin, stdout};
+    use tokio::signal::unix::{signal, SignalKind};
 
     let mut stdin = stdin();
     let mut stdout = stdout();
@@ -234,9 +316,41 @@ async fn run_io_bridge(
     let mut detach_state = DetachState::Normal;
     let mut input_buf = [0u8; 1024];
     let mut output_buf = [0u8; 4096];
+    
+    // Set up SIGWINCH handler for terminal resize
+    let mut sigwinch = signal(SignalKind::window_change())
+        .map_err(|e| AttachError::Io(e))?;
+    
+    // Track current size to detect changes
+    let mut current_size = get_terminal_size();
 
     loop {
         tokio::select! {
+            // Handle SIGWINCH (terminal resize)
+            _ = sigwinch.recv() => {
+                if let Some((rows, cols)) = get_terminal_size() {
+                    // Only send resize if size actually changed
+                    if current_size != Some((rows, cols)) {
+                        current_size = Some((rows, cols));
+                        debug!("Terminal resized to {}x{}, sending resize request", rows, cols);
+                        
+                        // Send resize request to server
+                        let request = Request::Resize {
+                            id: config.agent_id.clone(),
+                            rows,
+                            cols,
+                            clear_transcript: false,
+                        };
+                        let mut json = serde_json::to_string(&request)
+                            .expect("Request serialization should never fail");
+                        json.push('\n');
+                        if let Err(e) = stream.write_all(json.as_bytes()).await {
+                            warn!("Failed to send resize request: {e}");
+                        }
+                    }
+                }
+            }
+            
             // Read from user's stdin
             result = stdin.read(&mut input_buf), if !config.readonly => {
                 let n = result.map_err(AttachError::Io)?;
@@ -339,8 +453,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_attach_config_default() {
-        let config = AttachConfig::default();
+    fn test_attach_config_new() {
+        let config = AttachConfig::new("test-agent".to_string());
+        assert_eq!(config.agent_id, "test-agent");
         assert_eq!(config.detach_prefix, 0x07); // Ctrl+G
         assert_eq!(config.detach_key, b'd');
         assert!(!config.readonly);

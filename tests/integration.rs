@@ -553,10 +553,12 @@ async fn test_attach_readonly_mode() {
     json.push('\n');
     stream.write_all(json.as_bytes()).await.expect("write failed");
 
-    // Read AttachStarted
-    let mut buf = vec![0u8; 4096];
+    // Read AttachStarted (may include initial screen data after the JSON)
+    let mut buf = vec![0u8; 65536];
     let n = stream.read(&mut buf).await.expect("read failed");
-    let response: Response = serde_json::from_slice(&buf[..n]).expect("parse failed");
+    // Find the newline that terminates the JSON response
+    let newline_pos = buf[..n].iter().position(|&b| b == b'\n').expect("no newline");
+    let response: Response = serde_json::from_slice(&buf[..newline_pos]).expect("parse failed");
     
     assert!(matches!(response, Response::AttachStarted { .. }));
 

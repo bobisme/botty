@@ -335,6 +335,11 @@ pub enum Command {
         #[arg(long, default_value = "panes")]
         mode: String,
 
+        /// Disable automatic resizing of agent PTYs to match tmux pane dimensions.
+        /// By default, agents are resized when panes resize.
+        #[arg(long)]
+        no_resize: bool,
+
         /// Filter to agents with these labels (can be repeated, matches agents with ALL labels).
         #[arg(long, short)]
         label: Vec<String>,
@@ -352,6 +357,10 @@ pub enum Command {
         /// New number of columns.
         #[arg(long)]
         cols: u16,
+
+        /// Clear transcript buffer after resize (avoids display issues from old-size output).
+        #[arg(long)]
+        clear: bool,
     },
 
     /// Resize all agents in a botty view session to match their pane sizes.

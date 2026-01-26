@@ -6,6 +6,54 @@ use std::io::Write;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
+/// Guard that restores terminal output settings on drop.
+struct RawOutputGuard {
+    original_termios: nix::sys::termios::Termios,
+    fd: std::os::fd::OwnedFd,
+}
+
+impl Drop for RawOutputGuard {
+    fn drop(&mut self) {
+        use nix::sys::termios::{tcsetattr, SetArg};
+        let _ = tcsetattr(&self.fd, SetArg::TCSAFLUSH, &self.original_termios);
+    }
+}
+
+/// Disable output post-processing on stdout (OPOST flag).
+/// This is required for TUI programs - without it, escape sequences like
+/// cursor positioning get mangled (e.g., \n becomes \r\n).
+/// Returns a guard that restores the original settings on drop.
+fn disable_output_postprocessing() -> Option<RawOutputGuard> {
+    use nix::sys::termios::{tcgetattr, tcsetattr, OutputFlags, SetArg};
+    use std::os::fd::AsFd;
+
+    let stdout = std::io::stdout();
+    let stdout_fd = stdout.as_fd();
+
+    // Check if stdout is a TTY
+    if !nix::unistd::isatty(stdout_fd).unwrap_or(false) {
+        return None;
+    }
+
+    // Get current settings
+    let original_termios = tcgetattr(stdout_fd).ok()?;
+
+    // Create modified settings with OPOST disabled
+    let mut raw = original_termios.clone();
+    raw.output_flags.remove(OutputFlags::OPOST);
+
+    // Apply the new settings
+    tcsetattr(stdout_fd, SetArg::TCSAFLUSH, &raw).ok()?;
+
+    // Clone the fd for the guard
+    let fd = stdout_fd.try_clone_to_owned().ok()?;
+
+    Some(RawOutputGuard {
+        original_termios,
+        fd,
+    })
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -192,8 +240,9 @@ async fn run_client(
     }
 
     // View command manages tmux session
-    if let Command::View { mux, mode, label } = command {
-        return run_view_command(socket_path, mux, mode, label).await;
+    if let Command::View { mux, mode, no_resize, label } = command {
+        let auto_resize = !no_resize; // auto-resize is now the default
+        return run_view_command(socket_path, mux, mode, auto_resize, label).await;
     }
 
     // ResizePanes command (called from tmux hook)
@@ -387,6 +436,15 @@ async fn run_client(
             let follow = follow || replay;
             let raw = raw || replay;
 
+            // If raw mode and stdout is a TTY, disable output post-processing
+            // This is critical for TUI programs - without this, escape sequences
+            // like cursor positioning get mangled (e.g., \n becomes \r\n)
+            let _raw_output_guard = if raw {
+                disable_output_postprocessing()
+            } else {
+                None
+            };
+
             // Helper to strip ANSI codes if not raw mode
             let process_output = |data: &[u8], raw: bool| -> Vec<u8> {
                 if raw {
@@ -445,8 +503,13 @@ async fn run_client(
 
                     match response {
                         Response::Output { data } => {
-                            // Only print new data
-                            if data.len() > last_len {
+                            if data.len() < last_len {
+                                // Transcript shrank (cleared or ring buffer wrapped)
+                                // Just reset our position - TUI programs will redraw
+                                // themselves via SIGWINCH from the resize
+                                last_len = data.len();
+                            } else if data.len() > last_len {
+                                // Only print new data
                                 let new_data = &data[last_len..];
                                 let output = process_output(new_data, raw);
                                 std::io::stdout().write_all(&output)?;
@@ -552,12 +615,16 @@ async fn run_client(
             unreachable!("handled above")
         }
 
-        Command::Resize { id, rows, cols } => {
-            let response = client.request(Request::Resize { id, rows, cols }).await?;
+        Command::Resize { id, rows, cols, clear } => {
+            let response = client.request(Request::Resize { id, rows, cols, clear_transcript: clear }).await?;
 
             match response {
                 Response::Ok => {
-                    println!("Resized to {rows}x{cols}");
+                    if clear {
+                        println!("Resized to {rows}x{cols} and cleared transcript");
+                    } else {
+                        println!("Resized to {rows}x{cols}");
+                    }
                 }
                 Response::Error { message } => {
                     return Err(message.into());
@@ -848,11 +915,9 @@ async fn run_attach_command(
         }
     };
 
-    let config = AttachConfig {
-        detach_prefix,
-        readonly,
-        ..Default::default()
-    };
+    let mut config = AttachConfig::new(id.clone());
+    config.detach_prefix = detach_prefix;
+    config.readonly = readonly;
 
     match run_attach(&mut stream, &id, config).await {
         Ok(reason) => {
@@ -1080,6 +1145,7 @@ async fn run_view_command(
     socket_path: std::path::PathBuf,
     mux: String,
     mode: String,
+    auto_resize: bool,
     labels: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use botty::ViewMode;
@@ -1135,16 +1201,18 @@ async fn run_view_command(
     }
     view.create_session()?;
 
-    // Set up tmux hook for dynamic resizing when panes change
-    setup_resize_hook(&view, &mode)?;
+    // Set up tmux hook for dynamic resizing when panes change (only if auto_resize enabled)
+    if auto_resize {
+        setup_resize_hook(&view, &mode)?;
+    }
 
     // Create panes for existing agents
     for agent_id in &current_agents {
         view.add_pane(agent_id)?;
     }
 
-    // Resize agents to match their pane sizes
-    if !current_agents.is_empty() {
+    // Resize agents to match their pane sizes (only if auto_resize enabled)
+    if auto_resize && !current_agents.is_empty() {
         // Delay to let tmux finish creating panes and settling layout
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         
@@ -1400,30 +1468,67 @@ fn setup_resize_hook(view: &TmuxView, mode: &str) -> Result<(), ViewError> {
     
     let botty_path = view.botty_path();
     let session_name = "botty";
+    let session_window = format!("{}:agents", session_name);
     
     // Hook command: call botty resize-panes when any pane is resized
-    // The hook runs asynchronously so it won't block tmux
+    // The hook runs asynchronously (-b) so it won't block tmux
     let hook_cmd = format!("{} resize-panes --mode={}", botty_path, mode);
+    let run_shell = format!("run-shell -b '{}'", hook_cmd);
     
-    // Set hook for after-resize-pane (fires when panes are resized)
+    // Session-level hook: after-resize-pane (fires when individual panes are resized)
     let _ = Command::new("tmux")
         .args([
             "set-hook",
             "-t",
             session_name,
             "after-resize-pane",
-            &format!("run-shell -b '{}'", hook_cmd),
+            &run_shell,
         ])
         .status();
     
-    // Also hook window-layout-changed (fires when layout changes, e.g., after split/close)
+    // Session-level hook: client-attached (fires when a client attaches to the session)
     let _ = Command::new("tmux")
         .args([
             "set-hook",
             "-t",
             session_name,
+            "client-attached",
+            &run_shell,
+        ])
+        .status();
+    
+    // Session-level hook: client-session-changed (fires when switching to this session)
+    let _ = Command::new("tmux")
+        .args([
+            "set-hook",
+            "-t",
+            session_name,
+            "client-session-changed",
+            &run_shell,
+        ])
+        .status();
+    
+    // Session-level hook: client-resized (fires when the terminal window is resized)
+    let _ = Command::new("tmux")
+        .args([
+            "set-hook",
+            "-t",
+            session_name,
+            "client-resized",
+            &run_shell,
+        ])
+        .status();
+    
+    // Window-level hook: window-layout-changed (fires when layout changes, e.g., after split/close)
+    // Note: requires -w flag for window-level hooks
+    let _ = Command::new("tmux")
+        .args([
+            "set-hook",
+            "-w",
+            "-t",
+            &session_window,
             "window-layout-changed",
-            &format!("run-shell -b '{}'", hook_cmd),
+            &run_shell,
         ])
         .status();
 
@@ -1453,6 +1558,7 @@ async fn resize_agents_to_panes(
             id: agent_id.clone(),
             rows,
             cols,
+            clear_transcript: true, // Clear to avoid displaying old-size output
         };
         
         let mut json = serde_json::to_string(&request)?;
@@ -1464,7 +1570,7 @@ async fn resize_agents_to_panes(
 
         match serde_json::from_str::<Response>(&line)? {
             Response::Ok => {
-                tracing::debug!("Resized {} to {}x{}", agent_id, rows, cols);
+                tracing::debug!("Resized {} to {}x{} (cleared transcript)", agent_id, rows, cols);
             }
             Response::Error { message } => {
                 tracing::warn!("Failed to resize {}: {}", agent_id, message);
@@ -1487,12 +1593,12 @@ async fn run_resize_panes_command(
 
     let view_mode = ViewMode::from_str(&mode)?;
     
-    // Get path to our binary (not used for botty_path in TmuxView, but needed for consistency)
+    // Get path to our binary
     let botty_path = std::env::current_exe()
         .map_or_else(|_| "botty".to_string(), |p| p.to_string_lossy().to_string());
 
     // Create a view instance to query pane sizes
-    let mut view = TmuxView::with_mode(botty_path, view_mode);
+    let mut view = TmuxView::with_mode(botty_path.clone(), view_mode);
     
     // First, get the list of running agents to populate active_panes
     let stream = UnixStream::connect(&socket_path).await?;
@@ -1507,29 +1613,36 @@ async fn run_resize_panes_command(
     let mut line = String::new();
     reader.read_line(&mut line).await?;
 
-    let agents: Vec<String> = match serde_json::from_str::<Response>(&line)? {
+    // Collect agent IDs and their PIDs for SIGWINCH
+    let agents: Vec<(String, u32)> = match serde_json::from_str::<Response>(&line)? {
         Response::Agents { agents } => agents
             .into_iter()
             .filter(|a| a.state == botty::AgentState::Running)
-            .map(|a| a.id)
+            .map(|a| (a.id, a.pid))
             .collect(),
         Response::Error { message } => return Err(message.into()),
         _ => return Err("unexpected response to list".into()),
     };
 
     // Mark agents as having panes
-    for agent_id in &agents {
+    for (agent_id, _) in &agents {
         view.mark_pane_exists(agent_id);
     }
 
-    // Get pane sizes and resize
+    // Get pane sizes and resize agents to match
     let pane_sizes = view.get_pane_sizes()?;
     
-    for (agent_id, (rows, cols)) in pane_sizes {
+    // Build a map of agent_id -> pid for SIGWINCH
+    let agent_pids: std::collections::HashMap<String, u32> = agents.iter().cloned().collect();
+    
+    for (agent_id, (rows, cols)) in &pane_sizes {
+        // Don't clear transcript - let the running tail continue and programs
+        // will redraw themselves when they receive SIGWINCH from the resize
         let request = Request::Resize {
             id: agent_id.clone(),
-            rows,
-            cols,
+            rows: *rows,
+            cols: *cols,
+            clear_transcript: false,
         };
         
         let mut json = serde_json::to_string(&request)?;
@@ -1539,11 +1652,31 @@ async fn run_resize_panes_command(
         let mut line = String::new();
         reader.read_line(&mut line).await?;
 
-        // Just log, don't fail on individual resize errors
         if let Ok(Response::Ok) = serde_json::from_str::<Response>(&line) {
             tracing::debug!("Resized {} to {}x{}", agent_id, rows, cols);
         }
     }
+    
+    // Give a brief moment for the PTY resize to propagate
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    
+    // Send explicit SIGWINCH to each agent process to ensure they redraw
+    // Some TUI programs (like btop) need this extra signal to reliably redraw
+    for (agent_id, (_, _)) in &pane_sizes {
+        if let Some(&pid) = agent_pids.get(agent_id) {
+            // Send SIGWINCH (28) to the process
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGWINCH);
+            }
+            tracing::debug!("Sent SIGWINCH to {} (pid {})", agent_id, pid);
+        }
+    }
+    
+    // With attach --readonly, we don't need to respawn panes.
+    // The attach is already streaming live PTY output, so when the TUI
+    // program redraws after SIGWINCH, the attach passes it through directly.
+    // Respawning would kill the attach and start a new one, which would
+    // replay the (now stale) initial screen render.
 
     Ok(())
 }

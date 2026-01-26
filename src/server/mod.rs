@@ -592,7 +592,17 @@ async fn handle_request(
             Response::error("events request should not reach handle_request")
         }
 
-        Request::Resize { id, rows, cols } => {
+        Request::Resize { id, rows, cols, clear_transcript } => {
+            // Validate dimensions to prevent crashes or resource exhaustion
+            const MIN_SIZE: u16 = 1;
+            const MAX_SIZE: u16 = 500;
+            if rows < MIN_SIZE || rows > MAX_SIZE || cols < MIN_SIZE || cols > MAX_SIZE {
+                return Response::error(format!(
+                    "invalid dimensions: {}x{} (must be {}-{})",
+                    cols, rows, MIN_SIZE, MAX_SIZE
+                ));
+            }
+            
             let mut mgr = manager.lock().await;
             if let Some(agent) = mgr.get_mut(&id) {
                 // Resize the PTY
@@ -601,7 +611,14 @@ async fn handle_request(
                 }
                 // Update the screen model
                 agent.screen.resize(rows, cols);
-                info!(%id, %rows, %cols, "Resized agent");
+                // Optionally clear transcript (useful for view mode to avoid
+                // displaying output rendered at old size)
+                if clear_transcript {
+                    agent.transcript.clear();
+                    info!(%id, %rows, %cols, "Resized agent and cleared transcript");
+                } else {
+                    info!(%id, %rows, %cols, "Resized agent");
+                }
                 Response::Ok
             } else {
                 Response::error(format!("agent not found: {id}"))
@@ -663,6 +680,23 @@ async fn handle_attach(
         .map_err(ServerError::Io)?;
 
     info!("Attach started for agent {agent_id}");
+
+    // Send initial screen render so the client starts with correct display state
+    // This is critical for TUI programs that use incremental updates
+    {
+        let mgr = manager.lock().await;
+        if let Some(agent) = mgr.get(&agent_id) {
+            let initial_screen = agent.screen.render_full_screen();
+            info!("Sending initial screen render: {} bytes", initial_screen.len());
+            drop(mgr); // Release lock before async write
+            writer
+                .write_all(&initial_screen)
+                .await
+                .map_err(ServerError::Io)?;
+            writer.flush().await.map_err(ServerError::Io)?;
+            info!("Initial screen render sent");
+        }
+    }
 
     // Run the I/O bridge
     let result = run_attach_bridge(

@@ -5,3 +5,4 @@
 
 # BotBus agent coordination state (session-specific)
 .botbus/
+opencode.json

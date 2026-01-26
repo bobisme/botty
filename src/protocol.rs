@@ -159,6 +159,10 @@ pub enum Request {
         rows: u16,
         /// New terminal columns.
         cols: u16,
+        /// Clear transcript buffer after resize (useful when viewing to avoid
+        /// displaying old output rendered at wrong size).
+        #[serde(default)]
+        clear_transcript: bool,
     },
 }
 
@@ -467,6 +471,7 @@ mod tests {
                 id: "test-agent".into(),
                 rows: 40,
                 cols: 120,
+                clear_transcript: false,
             },
         ];
 
