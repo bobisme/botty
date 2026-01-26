@@ -100,6 +100,7 @@ impl TestHarness {
             rows,
             cols,
             name: None,
+            labels: vec![],
             env: vec![],
             env_clear: false,
         };
@@ -128,7 +129,7 @@ impl TestHarness {
             .client
             .lock()
             .await
-            .request(Request::List)
+            .request(Request::List { labels: vec![] })
             .await
             .map_err(|e| TestError::RequestFailed(e.to_string()))?;
 
@@ -389,7 +390,8 @@ impl AgentHandle {
     /// Send a signal to the agent.
     pub async fn signal(&self, signal: i32) -> Result<(), TestError> {
         let request = Request::Kill {
-            id: self.id.clone(),
+            id: Some(self.id.clone()),
+            labels: vec![],
             signal,
         };
 

@@ -18,6 +18,8 @@ pub struct Agent {
     pub id: String,
     /// The command that was spawned.
     pub command: Vec<String>,
+    /// Labels for grouping agents.
+    pub labels: Vec<String>,
     /// The PTY process.
     pub pty: PtyProcess,
     /// Current state.
@@ -37,10 +39,18 @@ pub struct Agent {
 impl Agent {
     /// Create a new agent.
     #[must_use]
-    pub fn new(id: String, command: Vec<String>, pty: PtyProcess, rows: u16, cols: u16) -> Self {
+    pub fn new(
+        id: String,
+        command: Vec<String>,
+        labels: Vec<String>,
+        pty: PtyProcess,
+        rows: u16,
+        cols: u16,
+    ) -> Self {
         Self {
             id,
             command,
+            labels,
             pty,
             state: AgentState::Running,
             started_at: Instant::now(),
@@ -48,6 +58,12 @@ impl Agent {
             screen: Screen::new(rows, cols),
             attached: false,
         }
+    }
+
+    /// Check if the agent has all the specified labels.
+    #[must_use]
+    pub fn has_labels(&self, labels: &[String]) -> bool {
+        labels.iter().all(|l| self.labels.contains(l))
     }
 
     /// Get the process ID.

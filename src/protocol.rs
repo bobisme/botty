@@ -34,6 +34,9 @@ pub enum Request {
         /// Optional custom agent ID (must be unique).
         #[serde(default)]
         name: Option<String>,
+        /// Labels for grouping agents.
+        #[serde(default)]
+        labels: Vec<String>,
         /// Environment variables to set (KEY=VALUE pairs).
         #[serde(default)]
         env: Vec<String>,
@@ -42,13 +45,21 @@ pub enum Request {
         env_clear: bool,
     },
 
-    /// List all agents.
-    List,
+    /// List all agents (optionally filtered by labels).
+    List {
+        /// Filter by labels (agents must have ALL specified labels).
+        #[serde(default)]
+        labels: Vec<String>,
+    },
 
-    /// Kill an agent by ID.
+    /// Kill an agent by ID or by labels.
     Kill {
-        /// Agent ID.
-        id: String,
+        /// Agent ID (optional if using labels).
+        #[serde(default)]
+        id: Option<String>,
+        /// Kill all agents with these labels.
+        #[serde(default)]
+        labels: Vec<String>,
         /// Unix signal number (default: SIGTERM = 15).
         #[serde(default = "default_signal")]
         signal: i32,
@@ -156,6 +167,9 @@ pub struct AgentInfo {
     pub state: AgentState,
     /// Command that was spawned.
     pub command: Vec<String>,
+    /// Labels assigned to this agent.
+    #[serde(default)]
+    pub labels: Vec<String>,
     /// Terminal size (rows, cols).
     pub size: (u16, u16),
     /// Unix timestamp when the agent was spawned (millis).
@@ -294,6 +308,9 @@ pub enum Event {
         pid: u32,
         /// Command that was spawned.
         command: Vec<String>,
+        /// Labels assigned to this agent.
+        #[serde(default)]
+        labels: Vec<String>,
     },
     /// An agent produced output.
     AgentOutput {
@@ -375,12 +392,14 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 name: None,
+                labels: vec!["worker".into()],
                 env: vec![],
                 env_clear: false,
             },
-            Request::List,
+            Request::List { labels: vec![] },
             Request::Kill {
-                id: "test-agent".into(),
+                id: Some("test-agent".into()),
+                labels: vec![],
                 signal: 9,
             },
             Request::Send {
@@ -437,6 +456,7 @@ mod tests {
                     pid: 12345,
                     state: AgentState::Running,
                     command: vec!["bash".into()],
+                    labels: vec!["worker".into()],
                     size: (24, 80),
                     started_at: 1706140800000,
                     exit_code: None,
@@ -455,6 +475,7 @@ mod tests {
                 id: "test-agent".into(),
                 pid: 12345,
                 command: vec!["bash".into()],
+                labels: vec![],
             }),
             Response::Event(Event::AgentOutput {
                 id: "test-agent".into(),

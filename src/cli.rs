@@ -78,6 +78,10 @@ pub enum Command {
         #[arg(long, short)]
         name: Option<String>,
 
+        /// Labels for grouping agents (can be repeated, e.g., --label worker --label batch-1).
+        #[arg(long, short)]
+        label: Vec<String>,
+
         /// Environment variables (KEY=VALUE format, can be repeated).
         #[arg(long, short, value_name = "KEY=VALUE")]
         env: Vec<String>,
@@ -97,15 +101,23 @@ pub enum Command {
         #[arg(long)]
         all: bool,
 
+        /// Filter by label (can be repeated, agents must have ALL labels).
+        #[arg(long, short)]
+        label: Vec<String>,
+
         /// Output in JSON format (for piping to jq).
         #[arg(long)]
         json: bool,
     },
 
-    /// Kill an agent.
+    /// Kill an agent (or all agents matching labels).
     Kill {
-        /// Agent ID.
-        id: String,
+        /// Agent ID (optional if using --label).
+        id: Option<String>,
+
+        /// Kill all agents with these labels (can be repeated, matches agents with ALL labels).
+        #[arg(long, short)]
+        label: Vec<String>,
 
         /// Send SIGTERM instead of SIGKILL (for graceful shutdown).
         #[arg(long)]
@@ -278,6 +290,10 @@ pub enum Command {
         /// Multiplexer to use (currently only tmux is supported).
         #[arg(long, default_value = "tmux")]
         mux: String,
+
+        /// Filter to agents with these labels (can be repeated, matches agents with ALL labels).
+        #[arg(long, short)]
+        label: Vec<String>,
     },
 
     /// Resize an agent's terminal.

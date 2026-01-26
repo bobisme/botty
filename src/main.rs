@@ -129,6 +129,7 @@ async fn run_doctor(
             rows: 24,
             cols: 80,
             name: Some("__doctor_test__".to_string()),
+            labels: vec![],
             env: vec![],
             env_clear: false,
         })
@@ -136,7 +137,7 @@ async fn run_doctor(
     {
         Ok(Response::Spawned { id, .. }) => {
             // Kill it
-            match client.request(Request::Kill { id: id.clone(), signal: 9 }).await {
+            match client.request(Request::Kill { id: Some(id.clone()), labels: vec![], signal: 9 }).await {
                 Ok(Response::Ok) => println!("[OK]"),
                 Ok(other) => {
                     println!("[FAIL] kill returned: {other:?}");
@@ -184,15 +185,15 @@ async fn run_client(
     }
 
     // View command manages tmux session
-    if let Command::View { mux } = command {
-        return run_view_command(socket_path, mux).await;
+    if let Command::View { mux, label } = command {
+        return run_view_command(socket_path, mux, label).await;
     }
 
     let mut client = Client::new(socket_path);
 
     match command {
-        Command::Spawn { rows, cols, name, env, env_clear, cmd } => {
-            let request = Request::Spawn { cmd, rows, cols, name, env, env_clear };
+        Command::Spawn { rows, cols, name, label, env, env_clear, cmd } => {
+            let request = Request::Spawn { cmd, rows, cols, name, labels: label, env, env_clear };
             let response = client.request(request).await?;
 
             match response {
@@ -209,8 +210,8 @@ async fn run_client(
             }
         }
 
-        Command::List { all, json } => {
-            let response = client.request(Request::List).await?;
+        Command::List { all, label, json } => {
+            let response = client.request(Request::List { labels: label }).await?;
 
             match response {
                 Response::Agents { agents } => {
@@ -237,6 +238,7 @@ async fn run_client(
                                         botty::AgentState::Exited => "exited",
                                     },
                                     "command": a.command.join(" "),
+                                    "labels": a.labels,
                                     "size": { "rows": a.size.0, "cols": a.size.1 },
                                     "exit_code": a.exit_code,
                                 })
@@ -254,7 +256,7 @@ async fn run_client(
                         // Default: TOON format (token-efficient for LLMs)
                         let json_data = serde_json::json!({
                             "agents": agents.iter().map(|a| {
-                                serde_json::json!({
+                                let mut agent_json = serde_json::json!({
                                     "id": a.id,
                                     "pid": a.pid,
                                     "state": match a.state {
@@ -262,7 +264,12 @@ async fn run_client(
                                         botty::AgentState::Exited => "exited",
                                     },
                                     "command": a.command.join(" "),
-                                })
+                                });
+                                // Only include labels if non-empty (keeps output compact)
+                                if !a.labels.is_empty() {
+                                    agent_json["labels"] = serde_json::json!(a.labels);
+                                }
+                                agent_json
                             }).collect::<Vec<_>>()
                         });
                         let toon = toon_format::encode(&json_data, &toon_format::EncodeOptions::default())
@@ -279,9 +286,13 @@ async fn run_client(
             }
         }
 
-        Command::Kill { id, term } => {
+        Command::Kill { id, label, term } => {
+            // Must specify either id or label
+            if id.is_none() && label.is_empty() {
+                return Err("must specify either agent ID or --label".into());
+            }
             let signal = if term { 15 } else { 9 }; // SIGTERM or SIGKILL (default)
-            let request = Request::Kill { id, signal };
+            let request = Request::Kill { id, labels: label, signal };
             let response = client.request(request).await?;
 
             match response {
@@ -623,6 +634,7 @@ async fn run_client(
                 rows,
                 cols,
                 name: None,
+                labels: vec![],
                 env: vec![],
                 env_clear: false,
             };
@@ -654,7 +666,8 @@ async fn run_client(
                 // Kill the agent before returning error
                 let _ = client
                     .request(Request::Kill {
-                        id: agent_id,
+                        id: Some(agent_id),
+                        labels: vec![],
                         signal: 9,
                     })
                     .await;
@@ -672,7 +685,8 @@ async fn run_client(
                     // Kill the agent and return timeout error
                     let _ = client
                         .request(Request::Kill {
-                            id: agent_id,
+                            id: Some(agent_id),
+                            labels: vec![],
                             signal: 9,
                         })
                         .await;
@@ -724,7 +738,8 @@ async fn run_client(
                                     // Kill agent, print output, then exit with the command's exit code
                                     let _ = client
                                         .request(Request::Kill {
-                                            id: agent_id.clone(),
+                                            id: Some(agent_id.clone()),
+                                            labels: vec![],
                                             signal: 9,
                                         })
                                         .await;
@@ -744,7 +759,8 @@ async fn run_client(
             // Kill the agent
             let _ = client
                 .request(Request::Kill {
-                    id: agent_id,
+                    id: Some(agent_id),
+                    labels: vec![],
                     signal: 9,
                 })
                 .await;
@@ -884,6 +900,7 @@ async fn run_events_command(
 async fn run_view_command(
     socket_path: std::path::PathBuf,
     mux: String,
+    labels: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
@@ -907,8 +924,8 @@ async fn run_view_command(
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
-    // Get the list of current agents
-    let list_request = Request::List;
+    // Get the list of current agents (optionally filtered by labels)
+    let list_request = Request::List { labels: labels.clone() };
     let mut json = serde_json::to_string(&list_request)?;
     json.push('\n');
     writer.write_all(json.as_bytes()).await?;
@@ -920,6 +937,7 @@ async fn run_view_command(
         Response::Agents { agents } => agents
             .into_iter()
             .filter(|a| a.state == botty::AgentState::Running)
+            // If label filters are specified, they're already applied server-side
             .map(|a| a.id)
             .collect(),
         Response::Error { message } => return Err(message.into()),

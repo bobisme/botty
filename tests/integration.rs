@@ -81,6 +81,7 @@ async fn test_spawn_and_list() {
             rows: 24,
             cols: 80,
             name: None,
+            labels: vec![],
             env: vec![],
             env_clear: false,
         })
@@ -96,7 +97,7 @@ async fn test_spawn_and_list() {
     };
 
     // List agents
-    let response = client.request(Request::List).await.expect("list failed");
+    let response = client.request(Request::List { labels: vec![] }).await.expect("list failed");
 
     match response {
         Response::Agents { agents } => {
@@ -110,7 +111,8 @@ async fn test_spawn_and_list() {
     // Kill the agent
     let response = client
         .request(Request::Kill {
-            id: agent_id,
+            id: Some(agent_id),
+            labels: vec![],
             signal: 15,
         })
         .await
@@ -146,6 +148,7 @@ async fn test_spawn_send_snapshot() {
             rows: 24,
             cols: 80,
             name: None,
+            labels: vec![],
             env: vec![],
             env_clear: false,
         })
@@ -198,7 +201,8 @@ async fn test_spawn_send_snapshot() {
     // Kill and shutdown
     let _ = client
         .request(Request::Kill {
-            id: agent_id,
+            id: Some(agent_id),
+            labels: vec![],
             signal: 9,
         })
         .await;
@@ -271,6 +275,7 @@ async fn test_screen_cursor_movement() {
             rows: 24,
             cols: 80,
             name: None,
+            labels: vec![],
             env: vec![],
             env_clear: false,
         })
@@ -308,7 +313,8 @@ async fn test_screen_cursor_movement() {
     // Cleanup
     let _ = client
         .request(Request::Kill {
-            id: agent_id,
+            id: Some(agent_id),
+            labels: vec![],
             signal: 9,
         })
         .await;
@@ -343,6 +349,7 @@ async fn test_transcript_tail() {
             rows: 24,
             cols: 80,
             name: None,
+            labels: vec![],
             env: vec![],
             env_clear: false,
         })
@@ -379,7 +386,8 @@ async fn test_transcript_tail() {
     // Cleanup
     let _ = client
         .request(Request::Kill {
-            id: agent_id,
+            id: Some(agent_id),
+            labels: vec![],
             signal: 9,
         })
         .await;
@@ -413,6 +421,7 @@ async fn test_attach_and_detach() {
             rows: 24,
             cols: 80,
             name: None,
+            labels: vec![],
             env: vec![],
             env_clear: false,
         })
@@ -462,7 +471,7 @@ async fn test_attach_and_detach() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Verify agent is still running (detach shouldn't kill it)
-    let response = client.request(Request::List).await.expect("list failed");
+    let response = client.request(Request::List { labels: vec![] }).await.expect("list failed");
     match response {
         Response::Agents { agents } => {
             assert_eq!(agents.len(), 1);
@@ -474,7 +483,8 @@ async fn test_attach_and_detach() {
     // Cleanup
     let _ = client
         .request(Request::Kill {
-            id: agent_id,
+            id: Some(agent_id),
+            labels: vec![],
             signal: 9,
         })
         .await;
@@ -504,6 +514,7 @@ async fn test_attach_readonly_mode() {
             rows: 24,
             cols: 80,
             name: None,
+            labels: vec![],
             env: vec![],
             env_clear: false,
         })
@@ -547,7 +558,8 @@ async fn test_attach_readonly_mode() {
     // Cleanup
     let _ = client
         .request(Request::Kill {
-            id: agent_id,
+            id: Some(agent_id),
+            labels: vec![],
             signal: 9,
         })
         .await;
@@ -623,6 +635,7 @@ async fn test_attach_receives_output() {
             rows: 24,
             cols: 80,
             name: None,
+            labels: vec![],
             env: vec![],
             env_clear: false,
         })
@@ -688,7 +701,8 @@ async fn test_attach_receives_output() {
     drop(stream);
     let _ = client
         .request(Request::Kill {
-            id: agent_id,
+            id: Some(agent_id),
+            labels: vec![],
             signal: 9,
         })
         .await;
@@ -718,6 +732,7 @@ async fn test_attach_agent_exit() {
             rows: 24,
             cols: 80,
             name: None,
+            labels: vec![],
             env: vec![],
             env_clear: false,
         })

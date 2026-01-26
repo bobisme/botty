@@ -289,7 +289,7 @@ async fn handle_request(
     match request {
         Request::Ping => Response::Pong,
 
-        Request::Spawn { cmd, rows, cols, name, env, env_clear } => {
+        Request::Spawn { cmd, rows, cols, name, labels, env, env_clear } => {
             if cmd.is_empty() {
                 return Response::error("command is empty");
             }
@@ -344,15 +344,16 @@ async fn handle_request(
                         mgr.remove(&id);
                     }
                     let pid = pty_process.pid.as_raw() as u32;
-                    let agent = Agent::new(id.clone(), cmd.clone(), pty_process, rows, cols);
+                    let agent = Agent::new(id.clone(), cmd.clone(), labels.clone(), pty_process, rows, cols);
                     mgr.add(agent);
-                    info!(%id, %pid, "Spawned agent");
+                    info!(%id, %pid, ?labels, "Spawned agent");
                     
                     // Publish spawn event
                     let _ = event_tx.send(Event::AgentSpawned {
                         id: id.clone(),
                         pid,
                         command: cmd,
+                        labels,
                     });
                     
                     Response::Spawned { id, pid }
@@ -361,10 +362,11 @@ async fn handle_request(
             }
         }
 
-        Request::List => {
+        Request::List { labels } => {
             let mgr = manager.lock().await;
             let agents: Vec<AgentInfo> = mgr
                 .list()
+                .filter(|agent| labels.is_empty() || agent.has_labels(&labels))
                 .map(|agent| {
                     let elapsed = agent.started_at.elapsed();
                     let now_millis = SystemTime::now()
@@ -381,6 +383,7 @@ async fn handle_request(
                             InternalAgentState::Exited { .. } => AgentState::Exited,
                         },
                         command: agent.command.clone(),
+                        labels: agent.labels.clone(),
                         size: agent.screen.size(),
                         started_at,
                         exit_code: agent.exit_code(),
@@ -390,7 +393,7 @@ async fn handle_request(
             Response::Agents { agents }
         }
 
-        Request::Kill { id, signal } => {
+        Request::Kill { id, labels, signal } => {
             // Validate signal number - only allow standard signals (1-31)
             // Real-time signals (32-64) and invalid numbers are rejected
             if !(1..=31).contains(&signal) {
@@ -398,22 +401,57 @@ async fn handle_request(
             }
             
             let mgr = manager.lock().await;
-            if let Some(agent) = mgr.get(&id) {
-                // Check if agent already exited
-                if !agent.is_running() {
-                    info!(%id, "Agent already exited, nothing to kill");
-                    return Response::Ok;
-                }
-                let sig = Signal::try_from(signal).unwrap_or(Signal::SIGTERM);
-                match agent.pty.signal(sig) {
-                    Ok(()) => {
-                        info!(%id, ?sig, "Sent signal to agent");
-                        Response::Ok
-                    }
-                    Err(e) => Response::error(format!("failed to send signal: {e}")),
-                }
+            
+            // Determine which agents to kill
+            let targets: Vec<String> = if let Some(ref agent_id) = id {
+                // Kill by specific ID
+                vec![agent_id.clone()]
+            } else if !labels.is_empty() {
+                // Kill by labels
+                mgr.list()
+                    .filter(|a| a.is_running() && a.has_labels(&labels))
+                    .map(|a| a.id.clone())
+                    .collect()
             } else {
-                Response::error(format!("agent not found: {id}"))
+                return Response::error("must specify either agent ID or --label");
+            };
+            
+            if targets.is_empty() {
+                if id.is_some() {
+                    return Response::error(format!("agent not found: {}", id.unwrap()));
+                }
+                return Response::error("no agents match the specified labels");
+            }
+            
+            let sig = Signal::try_from(signal).unwrap_or(Signal::SIGTERM);
+            let mut errors = Vec::new();
+            let mut killed = 0;
+            
+            for target_id in targets {
+                if let Some(agent) = mgr.get(&target_id) {
+                    // Check if agent already exited
+                    if !agent.is_running() {
+                        info!(%target_id, "Agent already exited, nothing to kill");
+                        continue;
+                    }
+                    match agent.pty.signal(sig) {
+                        Ok(()) => {
+                            info!(%target_id, ?sig, "Sent signal to agent");
+                            killed += 1;
+                        }
+                        Err(e) => {
+                            errors.push(format!("{target_id}: {e}"));
+                        }
+                    }
+                }
+            }
+            
+            if !errors.is_empty() {
+                Response::error(format!("failed to kill some agents: {}", errors.join(", ")))
+            } else if killed == 0 && id.is_some() {
+                Response::error(format!("agent not found: {}", id.unwrap()))
+            } else {
+                Response::Ok
             }
         }
 
