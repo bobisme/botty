@@ -8,3 +8,5 @@
 {"ts":"2026-01-26T20:13:52.519588768Z","author":"claude-implementer","event":"ThreadResolved","data":{"thread_id":"th-7nok","reason":"Fixed: Exit reason now checks exit code (143/137) to confirm timeout kill"}}
 {"ts":"2026-01-26T20:13:52.531959376Z","author":"claude-implementer","event":"ThreadResolved","data":{"thread_id":"th-al4i","reason":"Addressed: Signal failure is logged at warn level; mutex ensures no race"}}
 {"ts":"2026-01-26T20:13:52.544162371Z","author":"claude-implementer","event":"ThreadResolved","data":{"thread_id":"th-n1c8","reason":"Not applicable to this change - this is attach mode, timeout only applies to background agents"}}
+{"ts":"2026-01-26T20:15:00.247637033Z","author":"security-reviewer","event":"ReviewApproved","data":{"review_id":"cr-41e6"}}
+{"ts":"2026-01-26T20:15:00.343341732Z","author":"claude-implementer","event":"ReviewMerged","data":{"review_id":"cr-41e6","final_commit":"2b79d222daa97ca68605a785fa9caf4a3eec4588"}}
