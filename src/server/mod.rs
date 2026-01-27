@@ -222,6 +222,7 @@ async fn handle_connection(
                 reader.into_inner(),
                 writer,
                 &manager,
+                &event_tx,
             )
             .await;
 
@@ -318,9 +319,16 @@ async fn handle_request(
             // Validate and resolve agent ID
             let mut mgr = manager.lock().await;
             let id = if let Some(custom_name) = name {
-                // Validate custom name
+                // Validate custom name - must be non-empty and shell-safe
+                // Only allow alphanumeric, hyphen, and underscore to prevent command injection
                 if custom_name.is_empty() {
                     return Response::error("agent name cannot be empty");
+                }
+                if !custom_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                    return Response::error("agent name must contain only alphanumeric characters, hyphens, and underscores");
+                }
+                if custom_name.len() > 64 {
+                    return Response::error("agent name must be 64 characters or fewer");
                 }
                 // Check for uniqueness - allow reusing names of exited agents
                 if let Some(existing) = mgr.get(&custom_name) {
@@ -640,6 +648,7 @@ async fn handle_attach(
     mut reader: OwnedReadHalf,
     mut writer: OwnedWriteHalf,
     manager: &Arc<Mutex<AgentManager>>,
+    event_tx: &broadcast::Sender<Event>,
 ) -> Result<(), ServerError> {
     // Check if agent exists, get initial info, and mark as attached
     let size = {
@@ -708,21 +717,30 @@ async fn handle_attach(
     )
     .await;
 
-    // Clear attached flag
-    {
+    // Clear attached flag and determine end reason
+    let end_reason = {
         let mut mgr = manager.lock().await;
         if let Some(agent) = mgr.get_mut(&agent_id) {
             agent.attached = false;
         }
-    }
-
-    // Send AttachEnded response
-    let end_reason = match &result {
-        Ok(reason) => reason.clone(),
-        Err(e) => AttachEndReason::Error {
-            message: e.to_string(),
-        },
+        
+        match &result {
+            Ok(reason) => reason.clone(),
+            Err(e) => AttachEndReason::Error {
+                message: e.to_string(),
+            },
+        }
     };
+    // Lock released here before event broadcast
+    
+    // Publish exit event outside the lock to avoid holding it during broadcast
+    // (pty_reader_task skips attached agents, so we must publish here)
+    if let AttachEndReason::AgentExited { exit_code } = &end_reason {
+        let _ = event_tx.send(Event::AgentExited {
+            id: agent_id.clone(),
+            exit_code: *exit_code,
+        });
+    }
 
     let response = Response::AttachEnded { reason: end_reason };
     let mut json = serde_json::to_string(&response)

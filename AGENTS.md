@@ -466,6 +466,19 @@ crit lgtm <review_id> -m "Looks good!"
 crit block <review_id> -r "Need more test coverage"
 ```
 
+### Viewing Full Reviews
+
+```bash
+# Show full review with all threads and comments
+crit review <review_id>
+
+# Show with more context lines
+crit review <review_id> --context 5
+
+# List threads with first comment preview
+crit threads list <review_id> -v
+```
+
 ### Approving and Merging
 
 ```bash
@@ -475,6 +488,9 @@ crit reviews approve <review_id>
 # Mark as merged (after jj squash/merge)
 # Note: Will fail if there are blocking votes
 crit reviews merge <review_id>
+
+# Self-approve and merge in one step (solo workflows)
+crit reviews merge <review_id> --self-approve
 ```
 
 ### Agent Best Practices

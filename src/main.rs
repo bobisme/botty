@@ -1167,10 +1167,43 @@ async fn run_view_command(
     let botty_path = std::env::current_exe()
         .map_or_else(|_| "botty".to_string(), |p| p.to_string_lossy().to_string());
 
-    let mut view = TmuxView::with_mode(botty_path, view_mode);
+    let mut view = TmuxView::with_mode(botty_path.clone(), view_mode);
 
-    // Connect to server to get current agents
-    let stream = UnixStream::connect(&socket_path).await?;
+    // Connect to server, auto-starting if necessary
+    let stream = match UnixStream::connect(&socket_path).await {
+        Ok(s) => s,
+        Err(e) => {
+            // Only auto-start for expected "not running" errors
+            use std::io::ErrorKind;
+            match e.kind() {
+                ErrorKind::NotFound | ErrorKind::ConnectionRefused => {
+                    // Server not running, start it
+                    tracing::info!("Starting server...");
+                    std::process::Command::new(&botty_path)
+                        .arg("server")
+                        .arg("--daemon")
+                        .spawn()?;
+                    
+                    // Wait for server to be ready
+                    let mut connected = None;
+                    for _ in 0..50 {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        if let Ok(s) = UnixStream::connect(&socket_path).await {
+                            connected = Some(s);
+                            break;
+                        }
+                    }
+                    connected.ok_or_else(|| -> Box<dyn std::error::Error> { 
+                        "server did not start in time".into() 
+                    })?
+                }
+                _ => {
+                    // Real error (permission denied, etc.) - don't mask it
+                    return Err(e.into());
+                }
+            }
+        }
+    };
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
@@ -1221,9 +1254,9 @@ async fn run_view_command(
         }
     }
 
-    // If no agents, show a message
+    // If no agents, show the waiting placeholder
     if current_agents.is_empty() {
-        eprintln!("No agents running. Waiting for agents to spawn...");
+        view.show_waiting_placeholder()?;
     }
 
     // Spawn a task to listen for events and manage panes
@@ -1236,7 +1269,8 @@ async fn run_view_command(
     });
 
     // Attach to tmux (this blocks until user detaches or session ends)
-    let attach_result = view.attach();
+    // Run in spawn_blocking so we don't block the async runtime
+    let attach_result = tokio::task::spawn_blocking(move || view.attach()).await?;
 
     // Abort the event loop task
     event_handle.abort();
@@ -1299,14 +1333,18 @@ async fn run_view_event_loop(
                     }
                 }
                 Response::Event(Event::AgentExited { id, .. }) => {
-                    if let Err(e) = view.remove_pane(&id) {
-                        tracing::warn!("Failed to remove pane for {}: {}", id, e);
-                    }
-                    
-                    // If no more panes, kill the session
-                    if view.is_empty() {
-                        view.kill_session()?;
-                        break;
+                    // Check if this is the last pane BEFORE removing
+                    // If so, show placeholder instead of killing the pane
+                    // (killing the last pane would destroy the session)
+                    if view.pane_count() == 1 {
+                        view.clear_pane_tracking();
+                        if let Err(e) = view.show_waiting_placeholder() {
+                            tracing::warn!("Failed to show placeholder: {}", e);
+                        }
+                    } else {
+                        if let Err(e) = view.remove_pane(&id) {
+                            tracing::warn!("Failed to remove pane for {}: {}", id, e);
+                        }
                     }
                 }
                 Response::Error { message } => {

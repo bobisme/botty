@@ -108,11 +108,30 @@ impl TmuxView {
             ])
             .status()?;
 
-        if status.success() {
-            Ok(())
-        } else {
-            Err(ViewError::TmuxFailed("failed to create session".into()))
+        if !status.success() {
+            return Err(ViewError::TmuxFailed("failed to create session".into()));
         }
+
+        // Set remain-on-exit at window level so panes don't disappear when their
+        // process exits. This prevents the session from being destroyed when the
+        // last pane's process exits, giving us time to respawn with the placeholder.
+        let status = Command::new("tmux")
+            .args([
+                "set-option",
+                "-w",
+                "-t",
+                &format!("{}:agents", self.session_name),
+                "remain-on-exit",
+                "on",
+            ])
+            .status();
+        
+        if let Err(e) = status {
+            // Log but don't fail - session will still work, just won't persist on last pane exit
+            eprintln!("Warning: failed to set remain-on-exit: {}", e);
+        }
+
+        Ok(())
     }
 
     /// Create a pane/window for an agent.
@@ -129,7 +148,15 @@ impl TmuxView {
         // 1. Sends initial screen render (full screen with colors/positioning)
         // 2. Streams live PTY output in raw mode
         // 3. Properly handles cursor positioning and scroll regions
-        let tail_cmd = format!("{} attach --readonly {}", self.botty_path, agent_id);
+        //
+        // Wrap in a script that shows "exited" message after, preventing the pane from
+        // dying immediately (which would kill the session if it's the last pane).
+        // The event loop will respawn this pane with placeholder or remove it.
+        // Use a shorter sleep (5 min) to limit resource usage if event loop fails.
+        let tail_cmd = format!(
+            "{} attach --readonly {}; printf '\\033[2J\\033[H\\033[90m[exited]\\033[0m'; sleep 300",
+            self.botty_path, agent_id
+        );
 
         match self.mode {
             ViewMode::Panes => self.add_pane_split(agent_id, &tail_cmd)?,
@@ -314,10 +341,9 @@ impl TmuxView {
     /// Remove a pane in split mode.
     fn remove_pane_split(&self, agent_id: &str) -> Result<(), ViewError> {
         // Find and kill the pane with this agent ID
-        // We use list-panes to find panes by title
-        // Note: The format string uses tmux's #{var} syntax, not Rust's
+        // Use @agent_id pane option which is immune to title overwrites by TUI programs
         #[allow(clippy::literal_string_with_formatting_args)]
-        let format_str = "#{pane_id}:#{pane_title}";
+        let format_str = "#{pane_id}:#{@agent_id}";
         
         let output = Command::new("tmux")
             .args([
@@ -332,8 +358,8 @@ impl TmuxView {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
-                if let Some((pane_id, title)) = line.split_once(':')
-                    && title == agent_id
+                if let Some((pane_id, pane_agent_id)) = line.split_once(':')
+                    && pane_agent_id == agent_id
                 {
                     // Kill this pane
                     let _ = Command::new("tmux")
@@ -404,6 +430,96 @@ impl TmuxView {
         Ok(())
     }
 
+    /// Show a "waiting for agents" placeholder in the session.
+    /// Used when no agents are running to keep the session alive.
+    pub fn show_waiting_placeholder(&self) -> Result<(), ViewError> {
+        // Create a simple script that displays the waiting message
+        // Using a bash loop so it stays alive and can be killed when agents spawn
+        let placeholder_cmd = r#"printf '\033[2J\033[H\033[90m'; printf '
+    ╭─────────────────────────────────────╮
+    │                                     │
+    │      Waiting for agents...          │
+    │                                     │
+    │   Run: botty spawn -- <command>     │
+    │                                     │
+    ╰─────────────────────────────────────╯
+'; while true; do sleep 1; done"#;
+
+        match self.mode {
+            ViewMode::Panes => {
+                // Respawn the main pane with placeholder
+                let status = Command::new("tmux")
+                    .args([
+                        "respawn-pane",
+                        "-t",
+                        &format!("{}:agents", self.session_name),
+                        "-k",
+                        "bash",
+                        "-c",
+                        placeholder_cmd,
+                    ])
+                    .status()?;
+
+                if !status.success() {
+                    return Err(ViewError::TmuxFailed("failed to show placeholder".into()));
+                }
+
+                // Clear the @agent_id so it's not confused with a real agent
+                let _ = Command::new("tmux")
+                    .args([
+                        "set-option",
+                        "-p",
+                        "-t",
+                        &format!("{}:agents", self.session_name),
+                        "@agent_id",
+                        "",
+                    ])
+                    .status();
+
+                // Set pane title
+                let _ = Command::new("tmux")
+                    .args([
+                        "select-pane",
+                        "-t",
+                        &format!("{}:agents", self.session_name),
+                        "-T",
+                        "waiting",
+                    ])
+                    .status();
+            }
+            ViewMode::Windows => {
+                // Respawn the agents window with placeholder
+                let status = Command::new("tmux")
+                    .args([
+                        "respawn-window",
+                        "-t",
+                        &format!("{}:agents", self.session_name),
+                        "-k",
+                        "bash",
+                        "-c",
+                        placeholder_cmd,
+                    ])
+                    .status()?;
+
+                if !status.success() {
+                    return Err(ViewError::TmuxFailed("failed to show placeholder".into()));
+                }
+
+                // Rename window
+                let _ = Command::new("tmux")
+                    .args([
+                        "rename-window",
+                        "-t",
+                        &format!("{}:agents", self.session_name),
+                        "waiting",
+                    ])
+                    .status();
+            }
+        }
+
+        Ok(())
+    }
+
     /// Get the number of active panes.
     #[must_use]
     pub fn pane_count(&self) -> usize {
@@ -420,6 +536,11 @@ impl TmuxView {
     /// This doesn't create a pane, just tracks that one exists.
     pub fn mark_pane_exists(&mut self, agent_id: &str) {
         self.active_panes.insert(agent_id.to_string());
+    }
+
+    /// Clear all pane tracking (used when replacing last pane with placeholder).
+    pub fn clear_pane_tracking(&mut self) {
+        self.active_panes.clear();
     }
 
     /// Get the sizes of all panes/windows, keyed by agent ID.
