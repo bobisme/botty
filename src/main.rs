@@ -187,7 +187,7 @@ async fn run_doctor(
     {
         Ok(Response::Spawned { id, .. }) => {
             // Kill it
-            match client.request(Request::Kill { id: Some(id.clone()), labels: vec![], signal: 9 }).await {
+            match client.request(Request::Kill { id: Some(id.clone()), labels: vec![], all: false, signal: 9 }).await {
                 Ok(Response::Ok) => println!("[OK]"),
                 Ok(other) => {
                     println!("[FAIL] kill returned: {other:?}");
@@ -370,13 +370,17 @@ async fn run_client(
             }
         }
 
-        Command::Kill { id, label, term } => {
-            // Must specify either id or label
-            if id.is_none() && label.is_empty() {
-                return Err("must specify either agent ID or --label".into());
+        Command::Kill { id, label, all, term } => {
+            // Must specify either id, label, or all
+            if id.is_none() && label.is_empty() && !all {
+                return Err("must specify agent ID, --label, or --all".into());
+            }
+            // Can't combine --all with specific id or labels
+            if all && (id.is_some() || !label.is_empty()) {
+                return Err("--all cannot be combined with agent ID or --label".into());
             }
             let signal = if term { 15 } else { 9 }; // SIGTERM or SIGKILL (default)
-            let request = Request::Kill { id, labels: label, signal };
+            let request = Request::Kill { id, labels: label, all, signal };
             let response = client.request(request).await?;
 
             match response {
@@ -772,6 +776,7 @@ async fn run_client(
                     .request(Request::Kill {
                         id: Some(agent_id),
                         labels: vec![],
+                        all: false,
                         signal: 9,
                     })
                     .await;
@@ -791,6 +796,7 @@ async fn run_client(
                         .request(Request::Kill {
                             id: Some(agent_id),
                             labels: vec![],
+                            all: false,
                             signal: 9,
                         })
                         .await;
@@ -844,6 +850,7 @@ async fn run_client(
                                         .request(Request::Kill {
                                             id: Some(agent_id.clone()),
                                             labels: vec![],
+                                            all: false,
                                             signal: 9,
                                         })
                                         .await;
@@ -865,6 +872,7 @@ async fn run_client(
                 .request(Request::Kill {
                     id: Some(agent_id),
                     labels: vec![],
+                    all: false,
                     signal: 9,
                 })
                 .await;

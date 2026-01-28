@@ -2,7 +2,7 @@
 //!
 //! Each test uses a unique socket path to avoid conflicts.
 
-use botty::protocol::AttachEndReason;
+use botty::protocol::{AgentState, AttachEndReason};
 use botty::{Client, Request, Response, Server};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -115,6 +115,7 @@ async fn test_spawn_and_list() {
         .request(Request::Kill {
             id: Some(agent_id),
             labels: vec![],
+            all: false,
             signal: 15,
         })
         .await
@@ -207,6 +208,7 @@ async fn test_spawn_send_snapshot() {
         .request(Request::Kill {
             id: Some(agent_id),
             labels: vec![],
+            all: false,
             signal: 9,
         })
         .await;
@@ -321,6 +323,7 @@ async fn test_screen_cursor_movement() {
         .request(Request::Kill {
             id: Some(agent_id),
             labels: vec![],
+            all: false,
             signal: 9,
         })
         .await;
@@ -396,6 +399,7 @@ async fn test_transcript_tail() {
         .request(Request::Kill {
             id: Some(agent_id),
             labels: vec![],
+            all: false,
             signal: 9,
         })
         .await;
@@ -495,6 +499,7 @@ async fn test_attach_and_detach() {
         .request(Request::Kill {
             id: Some(agent_id),
             labels: vec![],
+            all: false,
             signal: 9,
         })
         .await;
@@ -574,6 +579,7 @@ async fn test_attach_readonly_mode() {
         .request(Request::Kill {
             id: Some(agent_id),
             labels: vec![],
+            all: false,
             signal: 9,
         })
         .await;
@@ -719,6 +725,7 @@ async fn test_attach_receives_output() {
         .request(Request::Kill {
             id: Some(agent_id),
             labels: vec![],
+            all: false,
             signal: 9,
         })
         .await;
@@ -813,6 +820,121 @@ async fn test_attach_agent_exit() {
 
     // Cleanup
     drop(stream);
+    let _ = client.request(Request::Shutdown).await;
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_kill_all() {
+    let socket_path = unique_socket_path();
+    let _cleanup = SocketCleanup(socket_path.clone());
+
+    // Start server
+    let server_socket = socket_path.clone();
+    let server_handle = tokio::spawn(async move {
+        let mut server = Server::new(server_socket);
+        server.run().await
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut client = Client::new(socket_path);
+
+    // Spawn multiple agents
+    for i in 0..3 {
+        let response = client
+            .request(Request::Spawn {
+                cmd: vec!["sleep".into(), "10".into()],
+                rows: 24,
+                cols: 80,
+                name: Some(format!("agent-{i}")),
+                labels: vec![],
+                timeout: None,
+                max_output: None,
+                env: vec![],
+                env_clear: false,
+            })
+            .await
+            .expect("spawn failed");
+
+        assert!(matches!(response, Response::Spawned { .. }));
+    }
+
+    // Verify we have 3 agents
+    let response = client.request(Request::List { labels: vec![] }).await.expect("list failed");
+    match &response {
+        Response::Agents { agents } => {
+            assert_eq!(agents.len(), 3, "should have 3 agents");
+        }
+        other => panic!("expected Agents, got {:?}", other),
+    }
+
+    // Kill all agents
+    let response = client
+        .request(Request::Kill {
+            id: None,
+            labels: vec![],
+            all: true,
+            signal: 9,
+        })
+        .await
+        .expect("kill --all failed");
+
+    assert!(matches!(response, Response::Ok));
+
+    // Give agents time to exit
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Verify all agents are gone (or exited)
+    let response = client.request(Request::List { labels: vec![] }).await.expect("list failed");
+    match response {
+        Response::Agents { agents } => {
+            let running: Vec<_> = agents.iter().filter(|a| a.state == AgentState::Running).collect();
+            assert!(running.is_empty(), "no agents should be running after kill --all, got: {:?}", running);
+        }
+        other => panic!("expected Agents, got {:?}", other),
+    }
+
+    // Shutdown
+    let _ = client.request(Request::Shutdown).await;
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_kill_all_no_agents() {
+    let socket_path = unique_socket_path();
+    let _cleanup = SocketCleanup(socket_path.clone());
+
+    // Start server
+    let server_socket = socket_path.clone();
+    let server_handle = tokio::spawn(async move {
+        let mut server = Server::new(server_socket);
+        server.run().await
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut client = Client::new(socket_path);
+
+    // Kill all when there are no agents - should return error
+    let response = client
+        .request(Request::Kill {
+            id: None,
+            labels: vec![],
+            all: true,
+            signal: 9,
+        })
+        .await
+        .expect("request failed");
+
+    match response {
+        Response::Error { message } => {
+            assert!(message.contains("no running agents"), "should say no running agents: {}", message);
+        }
+        other => panic!("expected Error, got {:?}", other),
+    }
+
+    // Shutdown
     let _ = client.request(Request::Shutdown).await;
     server_handle.abort();
 }

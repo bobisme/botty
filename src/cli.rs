@@ -129,12 +129,16 @@ pub enum Command {
 
     /// Kill an agent (or all agents matching labels).
     Kill {
-        /// Agent ID (optional if using --label).
+        /// Agent ID (optional if using --label or --all).
         id: Option<String>,
 
         /// Kill all agents with these labels (can be repeated, matches agents with ALL labels).
         #[arg(long, short)]
         label: Vec<String>,
+
+        /// Kill all running agents.
+        #[arg(long, short)]
+        all: bool,
 
         /// Send SIGTERM instead of SIGKILL (for graceful shutdown).
         #[arg(long)]

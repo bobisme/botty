@@ -58,14 +58,17 @@ pub enum Request {
         labels: Vec<String>,
     },
 
-    /// Kill an agent by ID or by labels.
+    /// Kill an agent by ID, by labels, or all agents.
     Kill {
-        /// Agent ID (optional if using labels).
+        /// Agent ID (optional if using labels or all).
         #[serde(default)]
         id: Option<String>,
         /// Kill all agents with these labels.
         #[serde(default)]
         labels: Vec<String>,
+        /// Kill all running agents.
+        #[serde(default)]
+        all: bool,
         /// Unix signal number (default: SIGTERM = 15).
         #[serde(default = "default_signal")]
         signal: i32,
@@ -441,6 +444,7 @@ mod tests {
             Request::Kill {
                 id: Some("test-agent".into()),
                 labels: vec![],
+                all: false,
                 signal: 9,
             },
             Request::Send {

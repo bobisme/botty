@@ -410,7 +410,7 @@ async fn handle_request(
             Response::Agents { agents }
         }
 
-        Request::Kill { id, labels, signal } => {
+        Request::Kill { id, labels, all, signal } => {
             // Validate signal number - only allow standard signals (1-31)
             // Real-time signals (32-64) and invalid numbers are rejected
             if !(1..=31).contains(&signal) {
@@ -423,6 +423,12 @@ async fn handle_request(
             let targets: Vec<String> = if let Some(ref agent_id) = id {
                 // Kill by specific ID
                 vec![agent_id.clone()]
+            } else if all {
+                // Kill all running agents
+                mgr.list()
+                    .filter(|a| a.is_running())
+                    .map(|a| a.id.clone())
+                    .collect()
             } else if !labels.is_empty() {
                 // Kill by labels
                 mgr.list()
@@ -430,12 +436,15 @@ async fn handle_request(
                     .map(|a| a.id.clone())
                     .collect()
             } else {
-                return Response::error("must specify either agent ID or --label");
+                return Response::error("must specify agent ID, --label, or --all");
             };
             
             if targets.is_empty() {
                 if id.is_some() {
                     return Response::error(format!("agent not found: {}", id.unwrap()));
+                }
+                if all {
+                    return Response::error("no running agents to kill");
                 }
                 return Response::error("no agents match the specified labels");
             }

@@ -394,6 +394,7 @@ impl AgentHandle {
         let request = Request::Kill {
             id: Some(self.id.clone()),
             labels: vec![],
+            all: false,
             signal,
         };
 
