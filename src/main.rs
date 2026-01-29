@@ -246,8 +246,13 @@ async fn run_client(
     }
 
     // ResizePanes command (called from tmux hook)
+    // Always exit with code 0 to avoid showing tmux errors to users
     if let Command::ResizePanes { mode } = command {
-        return run_resize_panes_command(socket_path, mode).await;
+        if let Err(e) = run_resize_panes_command(socket_path, mode).await {
+            // Log the error but don't propagate - we're in a tmux hook
+            tracing::warn!("resize-panes failed (this is okay): {}", e);
+        }
+        return Ok(());
     }
 
     // Clone socket_path before moving it to client (needed for dependency waiting)
