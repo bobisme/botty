@@ -552,7 +552,7 @@ crit reviews merge <review_id> --self-approve
    ```bash
    br ready                    # See what's actionable
    botbus history botty        # Check for messages from other agents
-   git pull origin main        # Get latest changes
+   jj git fetch                # Fetch latest from remote
    ```
 
 2. **Triage new issues** (if any were filed):
@@ -569,6 +569,11 @@ crit reviews merge <review_id> --self-approve
    - Prefer P2 over P3
    - Consider batching related features for a release
    - Bugs before features (users are affected now)
+
+4. **Start working** (jj tracks changes automatically):
+   ```bash
+   jj describe -m "wip: working on <feature>"
+   ```
 
 ### Feature Development Loop
 
@@ -596,10 +601,9 @@ For each feature, follow this cycle:
    - Do manual testing for UX features
    - Verify all tests pass before committing
 
-4. **Commit with semantic message**:
+4. **Describe your changes** with semantic message:
    ```bash
-   git add <files>
-   git commit -m "feat(scope): description
+   jj describe -m "feat(scope): description
 
    Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
    ```
@@ -609,10 +613,9 @@ For each feature, follow this cycle:
    br close <issue-id> --reason="Implemented in commit <sha>. [brief summary]"
    ```
 
-6. **Push to main** (for small, safe changes):
-   ```bash
-   git push origin main
-   ```
+6. **Continue to next feature** or prepare for release
+   - jj automatically creates a new working copy
+   - Each feature gets its own commit
 
 ### Batch Releases
 
@@ -640,12 +643,20 @@ This creates coherent releases with clear themes (e.g., "testing improvements").
 Before ending a work session:
 
 ```bash
-git status                   # Check for uncommitted work
+jj status                    # Check working copy state
+jj diff                      # Review changes
 br sync --flush-only         # Export beads to JSONL
-git add .beads/issues.jsonl  # Stage bead changes
-git commit -m "chore(beads): update issue tracking"
-git push origin main         # Push everything
+
+# Describe the beads update commit
+jj describe -m "chore(beads): update issue tracking
+
+Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
+
+# Push to main (if working directly on main)
+jj git push --bookmark main
 ```
+
+**Note**: If you've been making multiple commits, you may want to squash them before pushing. See the Release Workflow section for details on preparing changes for review.
 
 ## Release Workflow
 
