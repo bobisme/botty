@@ -46,6 +46,57 @@ pub fn parse_key_notation(s: &str) -> Option<u8> {
     None
 }
 
+/// Parse a named key sequence into bytes.
+///
+/// Supported keys:
+/// - Arrow keys: `up`, `down`, `left`, `right`
+/// - Special keys: `enter`, `tab`, `escape`, `backspace`, `delete`
+/// - Navigation: `home`, `end`, `pageup`, `pagedown`
+/// - Control sequences: `ctrl-c`, `ctrl-d`, etc.
+/// - Single characters: `a`, `b`, `x`, etc.
+///
+/// Returns None if the key name is not recognized.
+#[must_use]
+pub fn parse_key_sequence(s: &str) -> Option<Vec<u8>> {
+    let s = s.trim().to_lowercase();
+
+    // Try single-byte keys first (ctrl-X, single chars)
+    if let Some(byte) = parse_key_notation(&s) {
+        return Some(vec![byte]);
+    }
+
+    // Multi-byte ANSI escape sequences
+    match s.as_str() {
+        // Arrow keys (ESC [ X)
+        "up" => Some(vec![0x1b, 0x5b, 0x41]),       // ESC [ A
+        "down" => Some(vec![0x1b, 0x5b, 0x42]),     // ESC [ B
+        "right" => Some(vec![0x1b, 0x5b, 0x43]),    // ESC [ C
+        "left" => Some(vec![0x1b, 0x5b, 0x44]),     // ESC [ D
+
+        // Special keys
+        "enter" => Some(vec![0x0d]),                // CR
+        "return" => Some(vec![0x0d]),               // Alias for enter
+        "tab" => Some(vec![0x09]),                  // HT
+        "escape" | "esc" => Some(vec![0x1b]),       // ESC
+        "backspace" => Some(vec![0x7f]),            // DEL
+        "delete" | "del" => Some(vec![0x1b, 0x5b, 0x33, 0x7e]), // ESC [ 3 ~
+
+        // Navigation keys
+        "home" => Some(vec![0x1b, 0x5b, 0x48]),     // ESC [ H
+        "end" => Some(vec![0x1b, 0x5b, 0x46]),      // ESC [ F
+        "pageup" | "pgup" => Some(vec![0x1b, 0x5b, 0x35, 0x7e]), // ESC [ 5 ~
+        "pagedown" | "pgdn" | "pgdown" => Some(vec![0x1b, 0x5b, 0x36, 0x7e]), // ESC [ 6 ~
+
+        // Function keys (commonly used)
+        "f1" => Some(vec![0x1b, 0x4f, 0x50]),       // ESC O P
+        "f2" => Some(vec![0x1b, 0x4f, 0x51]),       // ESC O Q
+        "f3" => Some(vec![0x1b, 0x4f, 0x52]),       // ESC O R
+        "f4" => Some(vec![0x1b, 0x4f, 0x53]),       // ESC O S
+
+        _ => None,
+    }
+}
+
 /// PTY-based agent runtime.
 #[derive(Debug, Parser)]
 #[command(name = "botty", version, about)]
@@ -165,6 +216,26 @@ pub enum Command {
 
         /// Hex-encoded bytes (e.g., "1b5b41" for up arrow).
         hex: String,
+    },
+
+    /// Send a named key sequence to an agent.
+    ///
+    /// Supports arrow keys (up/down/left/right), special keys (enter/tab/escape),
+    /// control sequences (ctrl-c/ctrl-d), and more. See --help for full list.
+    SendKey {
+        /// Agent ID.
+        id: String,
+
+        /// Key name (e.g., "up", "down", "enter", "ctrl-c", "tab").
+        ///
+        /// Supported keys:
+        /// - Arrow keys: up, down, left, right
+        /// - Special: enter, tab, escape, backspace, delete
+        /// - Navigation: home, end, pageup, pagedown
+        /// - Control: ctrl-c, ctrl-d, etc.
+        /// - Function: f1, f2, f3, f4
+        /// - Single chars: a, b, x, etc.
+        key: String,
     },
 
     /// Tail agent output.
@@ -415,5 +486,63 @@ mod tests {
         assert_eq!(parse_key_notation("^ab"), None);
         assert_eq!(parse_key_notation("ab"), None);
         assert_eq!(parse_key_notation(""), None);
+    }
+
+    #[test]
+    fn test_parse_key_sequence_arrow_keys() {
+        assert_eq!(parse_key_sequence("up"), Some(vec![0x1b, 0x5b, 0x41]));
+        assert_eq!(parse_key_sequence("down"), Some(vec![0x1b, 0x5b, 0x42]));
+        assert_eq!(parse_key_sequence("right"), Some(vec![0x1b, 0x5b, 0x43]));
+        assert_eq!(parse_key_sequence("left"), Some(vec![0x1b, 0x5b, 0x44]));
+        assert_eq!(parse_key_sequence("UP"), Some(vec![0x1b, 0x5b, 0x41])); // Case insensitive
+    }
+
+    #[test]
+    fn test_parse_key_sequence_special_keys() {
+        assert_eq!(parse_key_sequence("enter"), Some(vec![0x0d]));
+        assert_eq!(parse_key_sequence("return"), Some(vec![0x0d]));
+        assert_eq!(parse_key_sequence("tab"), Some(vec![0x09]));
+        assert_eq!(parse_key_sequence("escape"), Some(vec![0x1b]));
+        assert_eq!(parse_key_sequence("esc"), Some(vec![0x1b]));
+        assert_eq!(parse_key_sequence("backspace"), Some(vec![0x7f]));
+        assert_eq!(parse_key_sequence("delete"), Some(vec![0x1b, 0x5b, 0x33, 0x7e]));
+    }
+
+    #[test]
+    fn test_parse_key_sequence_navigation() {
+        assert_eq!(parse_key_sequence("home"), Some(vec![0x1b, 0x5b, 0x48]));
+        assert_eq!(parse_key_sequence("end"), Some(vec![0x1b, 0x5b, 0x46]));
+        assert_eq!(parse_key_sequence("pageup"), Some(vec![0x1b, 0x5b, 0x35, 0x7e]));
+        assert_eq!(parse_key_sequence("pagedown"), Some(vec![0x1b, 0x5b, 0x36, 0x7e]));
+        assert_eq!(parse_key_sequence("pgup"), Some(vec![0x1b, 0x5b, 0x35, 0x7e]));
+    }
+
+    #[test]
+    fn test_parse_key_sequence_function_keys() {
+        assert_eq!(parse_key_sequence("f1"), Some(vec![0x1b, 0x4f, 0x50]));
+        assert_eq!(parse_key_sequence("f2"), Some(vec![0x1b, 0x4f, 0x51]));
+        assert_eq!(parse_key_sequence("f3"), Some(vec![0x1b, 0x4f, 0x52]));
+        assert_eq!(parse_key_sequence("f4"), Some(vec![0x1b, 0x4f, 0x53]));
+    }
+
+    #[test]
+    fn test_parse_key_sequence_control_chars() {
+        assert_eq!(parse_key_sequence("ctrl-c"), Some(vec![0x03]));
+        assert_eq!(parse_key_sequence("ctrl-d"), Some(vec![0x04]));
+        assert_eq!(parse_key_sequence("^c"), Some(vec![0x03]));
+    }
+
+    #[test]
+    fn test_parse_key_sequence_single_chars() {
+        assert_eq!(parse_key_sequence("a"), Some(vec![b'a']));
+        assert_eq!(parse_key_sequence("x"), Some(vec![b'x']));
+        assert_eq!(parse_key_sequence("5"), Some(vec![b'5']));
+    }
+
+    #[test]
+    fn test_parse_key_sequence_invalid() {
+        assert_eq!(parse_key_sequence("invalid-key"), None);
+        assert_eq!(parse_key_sequence("arrow-up"), None);
+        assert_eq!(parse_key_sequence(""), None);
     }
 }

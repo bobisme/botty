@@ -16,7 +16,7 @@ pub mod testing;
 pub mod view;
 
 pub use attach::{run_attach, AttachConfig, AttachError};
-pub use cli::{parse_key_notation, Cli, Command};
+pub use cli::{parse_key_notation, parse_key_sequence, Cli, Command};
 pub use client::{default_socket_path, Client, ClientError};
 pub use protocol::{AgentInfo, AgentState, DumpFormat, Event, ExitReason, Request, ResourceLimits, Response};
 pub use server::{Server, ServerError};

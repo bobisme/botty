@@ -504,3 +504,56 @@ fn test_kill_idempotent() {
         .assert()
         .success();
 }
+
+#[test]
+fn test_send_key() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    // Spawn bash
+    let output = env
+        .botty()
+        .args(["spawn", "--", "bash"])
+        .output()
+        .expect("failed to run spawn");
+    assert!(output.status.success());
+    let agent_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Send arrow keys and special keys - should all succeed
+    env.botty()
+        .args(["send-key", &agent_id, "up"])
+        .assert()
+        .success();
+
+    env.botty()
+        .args(["send-key", &agent_id, "down"])
+        .assert()
+        .success();
+
+    env.botty()
+        .args(["send-key", &agent_id, "enter"])
+        .assert()
+        .success();
+
+    env.botty()
+        .args(["send-key", &agent_id, "tab"])
+        .assert()
+        .success();
+
+    env.botty()
+        .args(["send-key", &agent_id, "ctrl-c"])
+        .assert()
+        .success();
+
+    // Invalid key name should fail
+    env.botty()
+        .args(["send-key", &agent_id, "invalid-key"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown key"));
+
+    // Clean up
+    env.botty().args(["kill", &agent_id]).assert().success();
+}
