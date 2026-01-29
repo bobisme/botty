@@ -388,6 +388,16 @@ async fn run_client(
                     println!("Signal sent");
                 }
                 Response::Error { message } => {
+                    // Make kill idempotent: exit 0 when agent/agents not found
+                    // This matches behavior of Unix tools like rm -f, pkill
+                    if message.contains("agent not found")
+                        || message.contains("no running agents to kill")
+                        || message.contains("no agents match the specified labels")
+                    {
+                        // Silently succeed - agent is already gone or wasn't there
+                        return Ok(());
+                    }
+                    // For other errors (permission denied, signal failures), still error
                     return Err(message.into());
                 }
                 _ => {

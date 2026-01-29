@@ -465,3 +465,42 @@ fn test_exec_exit_code_propagation() {
         .failure()
         .code(2);
 }
+
+#[test]
+fn test_kill_idempotent() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    // Killing a non-existent agent should succeed (like rm -f, pkill)
+    env.botty()
+        .args(["kill", "nonexistent-agent"])
+        .assert()
+        .success();
+
+    // Kill --all with no agents should also succeed
+    env.botty()
+        .args(["kill", "--all"])
+        .assert()
+        .success();
+
+    // Spawn an agent, kill it, then kill it again (should be idempotent)
+    let output = env
+        .botty()
+        .args(["spawn", "--", "sleep", "100"])
+        .output()
+        .expect("failed to run spawn");
+    assert!(output.status.success());
+    let agent_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // First kill succeeds
+    env.botty().args(["kill", &agent_id]).assert().success();
+
+    // Give it time to exit
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Second kill should also succeed (idempotent)
+    env.botty()
+        .args(["kill", &agent_id])
+        .assert()
+        .success();
+}
