@@ -228,6 +228,14 @@ pub async fn run_attach(
     let _terminal_state = TerminalState::enter_raw_mode()?;
     info!("Entered raw mode. Press Ctrl+G then 'd' to detach.");
 
+    // Hide cursor in readonly mode - we're just viewing, not interacting
+    // This prevents cursor flashing in TUI apps that continuously redraw
+    if config.readonly {
+        use std::io::Write;
+        print!("\x1b[?25l"); // DECTCEM - hide cursor
+        std::io::stdout().flush().map_err(AttachError::Io)?;
+    }
+
     // Read any additional initial screen data that may arrive
     // The server sends the screen render after the JSON response
     // Keep reading until we get no more data (with short timeouts)
@@ -279,6 +287,13 @@ pub async fn run_attach(
 
     // Run the I/O bridge
     let result = run_io_bridge(stream, &config).await;
+
+    // Restore cursor visibility in readonly mode
+    if config.readonly {
+        use std::io::Write;
+        print!("\x1b[?25h"); // DECTCEM - show cursor
+        let _ = std::io::stdout().flush();
+    }
 
     // Terminal state is restored on drop
     info!("Exited attach mode");
