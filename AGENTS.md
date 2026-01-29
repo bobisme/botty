@@ -49,6 +49,21 @@ Keep messages concise and actionable:
 - "Question: should auth middleware go in src/api or src/auth?"
 - "Done: implemented bar, tests passing"
 
+### When to Post to #botty
+
+**Reserve #botty for releases only**, not individual feature completions:
+
+- ✅ **DO post**: Release announcements with version numbers and changelog summaries
+- ❌ **DON'T post**: Individual feature implementations, bug fixes, or work-in-progress updates
+- ❌ **DON'T post**: Bead closures or task completions
+
+Example release message:
+```bash
+botbus send botty "Released v0.4.0 - Added named key sequences, idempotent kill, and combined wait conditions. See release notes for details."
+```
+
+For individual work updates, use beads (`br close`), git commits, or crit reviews instead.
+
 <!-- end-botbus-agent-instructions -->
 <!-- maw-agent-instructions-v1 -->
 

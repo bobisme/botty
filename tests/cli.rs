@@ -465,3 +465,153 @@ fn test_exec_exit_code_propagation() {
         .failure()
         .code(2);
 }
+
+#[test]
+fn test_kill_idempotent() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    // Killing a non-existent agent should succeed (like rm -f, pkill)
+    env.botty()
+        .args(["kill", "nonexistent-agent"])
+        .assert()
+        .success();
+
+    // Kill --all with no agents should also succeed
+    env.botty()
+        .args(["kill", "--all"])
+        .assert()
+        .success();
+
+    // Spawn an agent, kill it, then kill it again (should be idempotent)
+    let output = env
+        .botty()
+        .args(["spawn", "--", "sleep", "100"])
+        .output()
+        .expect("failed to run spawn");
+    assert!(output.status.success());
+    let agent_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // First kill succeeds
+    env.botty().args(["kill", &agent_id]).assert().success();
+
+    // Give it time to exit
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Second kill should also succeed (idempotent)
+    env.botty()
+        .args(["kill", &agent_id])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_send_key() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    // Spawn bash
+    let output = env
+        .botty()
+        .args(["spawn", "--", "bash"])
+        .output()
+        .expect("failed to run spawn");
+    assert!(output.status.success());
+    let agent_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Send arrow keys and special keys - should all succeed
+    env.botty()
+        .args(["send-key", &agent_id, "up"])
+        .assert()
+        .success();
+
+    env.botty()
+        .args(["send-key", &agent_id, "down"])
+        .assert()
+        .success();
+
+    env.botty()
+        .args(["send-key", &agent_id, "enter"])
+        .assert()
+        .success();
+
+    env.botty()
+        .args(["send-key", &agent_id, "tab"])
+        .assert()
+        .success();
+
+    env.botty()
+        .args(["send-key", &agent_id, "ctrl-c"])
+        .assert()
+        .success();
+
+    // Invalid key name should fail
+    env.botty()
+        .args(["send-key", &agent_id, "invalid-key"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown key"));
+
+    // Clean up
+    env.botty().args(["kill", &agent_id]).assert().success();
+}
+
+#[test]
+fn test_wait_combined_conditions() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    // Spawn bash
+    let output = env
+        .botty()
+        .args(["spawn", "--", "bash"])
+        .output()
+        .expect("failed to run spawn");
+    assert!(output.status.success());
+    let agent_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Test 1: Wait with --stable alone should work
+    env.botty()
+        .args(["wait", &agent_id, "--stable", "100", "--timeout", "5"])
+        .assert()
+        .success();
+
+    // Test 2: Send some output and wait for it with --contains alone
+    env.botty()
+        .args(["send", &agent_id, "echo test123"])
+        .assert()
+        .success();
+
+    env.botty()
+        .args(["wait", &agent_id, "--contains", "test123", "--timeout", "5"])
+        .assert()
+        .success();
+
+    // Test 3: Combined --stable AND --contains
+    // Send a command and wait for both stable screen AND specific content
+    env.botty()
+        .args(["send", &agent_id, "echo hello-combined"])
+        .assert()
+        .success();
+
+    env.botty()
+        .args([
+            "wait",
+            &agent_id,
+            "--stable",
+            "100",
+            "--contains",
+            "hello-combined",
+            "--timeout",
+            "5",
+        ])
+        .assert()
+        .success();
+
+    // Clean up
+    env.botty().args(["kill", &agent_id]).assert().success();
+}
