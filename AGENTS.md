@@ -544,9 +544,112 @@ crit reviews merge <review_id> --self-approve
 
 <!-- end-crit-agent-instructions -->
 
-## Development Workflow
+## Daily Development Workflow
 
-This section covers the full cycle: creating a feature branch, implementing changes, getting review, and releasing.
+### Starting a Work Session
+
+1. **Check for new work** and triage if needed:
+   ```bash
+   br ready                    # See what's actionable
+   botbus history botty        # Check for messages from other agents
+   git pull origin main        # Get latest changes
+   ```
+
+2. **Triage new issues** (if any were filed):
+   - Read the actual code to assess feasibility
+   - Check for existing infrastructure you can leverage
+   - Estimate complexity and update priority if needed
+   - Add implementation notes to the bead description
+   ```bash
+   br show <issue-id>
+   br update <issue-id> --priority=2 --description="Updated with implementation notes"
+   ```
+
+3. **Pick work** based on priority and scope:
+   - Prefer P2 over P3
+   - Consider batching related features for a release
+   - Bugs before features (users are affected now)
+
+### Feature Development Loop
+
+For each feature, follow this cycle:
+
+1. **Start the work**:
+   ```bash
+   br update <issue-id> --status=in_progress
+   ```
+
+2. **Implement the feature**:
+   - Read existing code to understand patterns
+   - Make minimal, focused changes
+   - Avoid over-engineering or premature abstraction
+   - Follow existing conventions (file structure, naming, error handling)
+
+3. **Test thoroughly**:
+   ```bash
+   cargo test                  # Unit + integration tests
+   cargo test <test-name>      # Specific test
+   cargo build --release       # Verify it builds
+   ```
+   - Add unit tests for new functions
+   - Add integration/CLI tests for new commands
+   - Do manual testing for UX features
+   - Verify all tests pass before committing
+
+4. **Commit with semantic message**:
+   ```bash
+   git add <files>
+   git commit -m "feat(scope): description
+
+   Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
+   ```
+
+5. **Close the bead**:
+   ```bash
+   br close <issue-id> --reason="Implemented in commit <sha>. [brief summary]"
+   ```
+
+6. **Push to main** (for small, safe changes):
+   ```bash
+   git push origin main
+   ```
+
+### Batch Releases
+
+Instead of releasing after each feature, batch multiple features into a release:
+
+1. Work on 2-4 related features
+2. Test everything together
+3. Bump version, tag, and release as one unit
+4. **Only then** announce on #botty
+
+This creates coherent releases with clear themes (e.g., "testing improvements").
+
+### Bug Investigation Workflow
+
+1. **Understand the symptom**: Read the bug report carefully
+2. **Find the code**: Use `grep`, `rg`, or `ast-grep` to locate relevant code
+3. **Reproduce locally**: Try to trigger the bug yourself
+4. **Identify root cause**: Read the code, trace the execution path
+5. **Design minimal fix**: Target the root cause, avoid over-engineering
+6. **Test the fix**: Verify it solves the problem without breaking anything
+7. **Consider edge cases**: What else might be affected?
+
+### End of Session Checklist
+
+Before ending a work session:
+
+```bash
+git status                   # Check for uncommitted work
+br sync --flush-only         # Export beads to JSONL
+git add .beads/issues.jsonl  # Stage bead changes
+git commit -m "chore(beads): update issue tracking"
+git push origin main         # Push everything
+```
+
+## Release Workflow
+
+This section covers the full release cycle: creating a feature branch, implementing changes, getting review, and releasing.
 
 ### 1. Start a Feature Branch
 
