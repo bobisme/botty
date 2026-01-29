@@ -703,13 +703,30 @@ async fn run_client(
                     _ => return Err("unexpected response".into()),
                 };
 
-                // Check conditions
-                let condition_met = if let Some(ref needle) = contains {
-                    snapshot.contains(needle)
-                } else if let Some(ref pat) = pattern {
+                // Check conditions - all specified conditions must be met (AND logic)
+                let mut all_conditions_met = true;
+                let mut any_condition_specified = false;
+
+                // Check contains condition
+                if let Some(ref needle) = contains {
+                    any_condition_specified = true;
+                    if !snapshot.contains(needle) {
+                        all_conditions_met = false;
+                    }
+                }
+
+                // Check pattern condition
+                if let Some(ref pat) = pattern {
+                    any_condition_specified = true;
                     let re = Regex::new(pat).map_err(|e| format!("invalid regex: {e}"))?;
-                    re.is_match(&snapshot)
-                } else if let Some(stable_ms) = stable {
+                    if !re.is_match(&snapshot) {
+                        all_conditions_met = false;
+                    }
+                }
+
+                // Check stable condition (always track stability)
+                let is_stable = if let Some(stable_ms) = stable {
+                    any_condition_specified = true;
                     let stable_duration = Duration::from_millis(stable_ms);
                     if snapshot == last_snapshot {
                         stable_since.elapsed() >= stable_duration
@@ -718,11 +735,23 @@ async fn run_client(
                         false
                     }
                 } else {
-                    // No condition specified - just wait for any output change
-                    !snapshot.is_empty() && snapshot != last_snapshot
+                    // Update stability tracking even if not checking for it
+                    if snapshot != last_snapshot {
+                        stable_since = Instant::now();
+                    }
+                    true // Not checking stability, so treat as satisfied
                 };
 
-                if condition_met {
+                if !is_stable {
+                    all_conditions_met = false;
+                }
+
+                // If no conditions specified, wait for any output change
+                if !any_condition_specified {
+                    all_conditions_met = !snapshot.is_empty() && snapshot != last_snapshot;
+                }
+
+                if all_conditions_met {
                     if print {
                         println!("{snapshot}");
                     }

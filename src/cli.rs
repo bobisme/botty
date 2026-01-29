@@ -312,20 +312,24 @@ pub enum Command {
     Shutdown,
 
     /// Wait for agent output to match a condition.
+    ///
+    /// Conditions can be combined with AND logic. For example:
+    /// `--stable 200 --contains "$ "` waits for the screen to be stable
+    /// for 200ms AND contain the prompt.
     Wait {
         /// Agent ID.
         id: String,
 
         /// Wait until output contains this string.
-        #[arg(long, group = "condition")]
+        #[arg(long)]
         contains: Option<String>,
 
         /// Wait until output matches this regex pattern.
-        #[arg(long, group = "condition")]
+        #[arg(long)]
         pattern: Option<String>,
 
         /// Wait until screen is stable (hasn't changed for this duration).
-        #[arg(long, group = "condition", value_name = "MILLIS")]
+        #[arg(long, value_name = "MILLIS")]
         stable: Option<u64>,
 
         /// Timeout in seconds.
