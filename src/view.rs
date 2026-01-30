@@ -131,7 +131,66 @@ impl TmuxView {
             eprintln!("Warning: failed to set remain-on-exit: {}", e);
         }
 
+        // Enable pane border banners showing agent info
+        let session_window = format!("{}:agents", self.session_name);
+        let _ = Command::new("tmux")
+            .args([
+                "set-option", "-w", "-t", &session_window,
+                "pane-border-status", "top",
+            ])
+            .status();
+
+        // Format: "agent-id · command [labels]"
+        // Uses @agent_id, @agent_command, @agent_labels pane options
+        #[allow(clippy::literal_string_with_formatting_args)]
+        let border_format =
+            "#{?pane_active,#[reverse],} #{@agent_id}#{?#{@agent_command}, · #{@agent_command},}#{?#{@agent_labels}, [#{@agent_labels}],} #[default]";
+        let _ = Command::new("tmux")
+            .args([
+                "set-option", "-w", "-t", &session_window,
+                "pane-border-format", border_format,
+            ])
+            .status();
+
         Ok(())
+    }
+
+    /// Set metadata on a pane (command, labels) for display in the border banner.
+    pub fn set_pane_metadata(&self, agent_id: &str, command: &str, labels: &[String]) {
+        // Find the pane by @agent_id and set additional options
+        #[allow(clippy::literal_string_with_formatting_args)]
+        let format_str = "#{pane_id}:#{@agent_id}";
+        let session_window = format!("{}:agents", self.session_name);
+
+        let output = match self.mode {
+            ViewMode::Panes => Command::new("tmux")
+                .args(["list-panes", "-t", &session_window, "-F", format_str])
+                .output(),
+            ViewMode::Windows => Command::new("tmux")
+                .args(["list-panes", "-s", "-t", &self.session_name, "-F", format_str])
+                .output(),
+        };
+        if let Ok(output) = output {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Some((pane_id, pane_agent)) = line.split_once(':')
+                        && pane_agent == agent_id
+                    {
+                        let _ = Command::new("tmux")
+                            .args(["set-option", "-p", "-t", pane_id, "@agent_command", command])
+                            .status();
+                        if !labels.is_empty() {
+                            let label_str = labels.join(",");
+                            let _ = Command::new("tmux")
+                                .args(["set-option", "-p", "-t", pane_id, "@agent_labels", &label_str])
+                                .status();
+                        }
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// Create a pane/window for an agent.

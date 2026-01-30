@@ -1271,14 +1271,16 @@ async fn run_view_command(
                         .arg("--daemon")
                         .spawn()?;
                     
-                    // Wait for server to be ready
+                    // Wait for server to be ready (exponential backoff: 50ms → 500ms cap)
                     let mut connected = None;
-                    for _ in 0..50 {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let mut delay_ms = 50u64;
+                    for _ in 0..20 {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         if let Ok(s) = UnixStream::connect(&socket_path).await {
                             connected = Some(s);
                             break;
                         }
+                        delay_ms = (delay_ms * 2).min(500);
                     }
                     connected.ok_or_else(|| -> Box<dyn std::error::Error> { 
                         "server did not start in time".into() 
@@ -1303,16 +1305,15 @@ async fn run_view_command(
     let mut line = String::new();
     reader.read_line(&mut line).await?;
     
-    let current_agents: Vec<String> = match serde_json::from_str::<Response>(&line)? {
+    let current_agents: Vec<botty::AgentInfo> = match serde_json::from_str::<Response>(&line)? {
         Response::Agents { agents } => agents
             .into_iter()
             .filter(|a| a.state == botty::AgentState::Running)
-            // If label filters are specified, they're already applied server-side
-            .map(|a| a.id)
             .collect(),
         Response::Error { message } => return Err(message.into()),
         _ => return Err("unexpected response to list".into()),
     };
+    let current_agent_ids: Vec<String> = current_agents.iter().map(|a| a.id.clone()).collect();
 
     if view.session_exists() && !new_session {
         // Reattach: session already exists, just reconcile panes
@@ -1322,10 +1323,12 @@ async fn run_view_command(
 
         // Add panes for agents that are running but don't have a pane yet
         // (spawned while we were detached)
-        for agent_id in &current_agents {
-            if !existing_panes.contains(agent_id) {
-                view.add_pane(agent_id)?;
+        for agent in &current_agents {
+            if !existing_panes.contains(&agent.id) {
+                view.add_pane(&agent.id)?;
             }
+            // Always update metadata (command/labels may have been set after initial spawn)
+            view.set_pane_metadata(&agent.id, &agent.command.join(" "), &agent.labels);
         }
     } else {
         // Fresh session — kill stale session if --new-session was passed
@@ -1340,8 +1343,9 @@ async fn run_view_command(
         }
 
         // Create panes for existing agents
-        for agent_id in &current_agents {
-            view.add_pane(agent_id)?;
+        for agent in &current_agents {
+            view.add_pane(&agent.id)?;
+            view.set_pane_metadata(&agent.id, &agent.command.join(" "), &agent.labels);
         }
 
         // Resize agents to match their pane sizes
@@ -1364,7 +1368,7 @@ async fn run_view_command(
 
     // Spawn a task to listen for events and manage panes
     let socket_path_clone = socket_path.clone();
-    let existing_agents = current_agents.clone();
+    let existing_agents = current_agent_ids.clone();
     let event_handle = tokio::spawn(async move {
         if let Err(e) = run_view_event_loop(socket_path_clone, existing_agents, view_mode).await {
             tracing::warn!("Event loop error: {}", e);
@@ -1435,11 +1439,12 @@ async fn run_view_event_loop(
 
         if let Ok(response) = serde_json::from_str::<Response>(&line) {
             match response {
-                Response::Event(Event::AgentSpawned { id, .. }) => {
+                Response::Event(Event::AgentSpawned { id, command, labels, .. }) => {
                     let was_empty = view.is_empty();
                     if let Err(e) = view.add_pane(&id) {
                         tracing::warn!("Failed to add pane for {}: {}", id, e);
                     }
+                    view.set_pane_metadata(&id, &command.join(" "), &labels);
                     // When transitioning from placeholder to first real pane,
                     // retile so it fills the window properly
                     if was_empty {
