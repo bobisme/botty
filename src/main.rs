@@ -1304,6 +1304,9 @@ async fn run_view_command(
     }
     view.create_session()?;
 
+    // Set up command palette (prefix+P / F1)
+    setup_command_palette(&view)?;
+
     // Set up tmux hook for dynamic resizing when panes change (only if auto_resize enabled)
     if auto_resize {
         setup_resize_hook(&view, &mode)?;
@@ -1637,6 +1640,61 @@ fn setup_resize_hook(view: &TmuxView, mode: &str) -> Result<(), ViewError> {
             &session_window,
             "window-layout-changed",
             &run_shell,
+        ])
+        .status();
+
+    Ok(())
+}
+
+/// Set up a command palette accessible via Ctrl+P in the botty tmux session.
+fn setup_command_palette(view: &TmuxView) -> Result<(), ViewError> {
+    use std::process::Command;
+
+    let botty_path = view.botty_path();
+    let session_name = "botty";
+
+    // tmux display-menu takes triplets: label, shortcut-key, command
+    // An empty label "" creates a separator line.
+    // Pipe through `less -R` so the popup stays open until user presses q.
+    // (-E closes popup when less exits)
+    let list_cmd = format!(
+        "display-popup -h 75% -w 80% -E '{} list | less -R'",
+        botty_path
+    );
+    let snapshot_cmd = format!(
+        "display-popup -h 75% -w 80% -E '{} snapshot #{{@agent_id}} | less -R'",
+        botty_path
+    );
+    // Shutdown: stop the server, then detach from the tmux session
+    let shutdown_cmd = format!(
+        "display-popup -E '{} shutdown && tmux detach-client'",
+        botty_path
+    );
+
+    let menu_args: Vec<&str> = vec![
+        "display-menu",
+        "-T", "#[align=centre]botty",
+        "List Agents",    "l", &list_cmd,
+        "Snapshot Pane",  "s", &snapshot_cmd,
+        "",               "",  "",
+        "Refresh Layout", "r", "select-layout tiled",
+        "",               "",  "",
+        "Detach",         "d", "detach-client",
+        "Shutdown",       "S", &shutdown_cmd,
+    ];
+
+    // Bind Ctrl+P in root table (no prefix needed — panes are readonly)
+    let mut args = vec!["bind-key", "-T", "root", "C-p"];
+    args.extend_from_slice(&menu_args);
+    let _ = Command::new("tmux").args(&args).status();
+
+    // Show a brief status message so users know the palette exists
+    let _ = Command::new("tmux")
+        .args([
+            "display-message",
+            "-t", session_name,
+            "-d", "3000",
+            "botty view — press Ctrl+P for command palette",
         ])
         .status();
 
