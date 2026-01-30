@@ -443,7 +443,7 @@ impl TmuxView {
     │   Run: botty spawn -- <command>     │
     │                                     │
     ╰─────────────────────────────────────╯
-'; while true; do sleep 1; done"#;
+'; sleep 3600"#;  // 1-hour timeout to avoid running forever if abandoned
 
         match self.mode {
             ViewMode::Panes => {

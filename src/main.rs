@@ -283,7 +283,10 @@ async fn run_client(
             }
         }
 
-        Command::List { all, label, json } => {
+        Command::List { all, label, format, json } => {
+            // --json is deprecated shorthand for --format json
+            let format = if json { "json".to_string() } else { format };
+
             let response = client.request(Request::List { labels: label }).await?;
 
             match response {
@@ -298,9 +301,9 @@ async fn run_client(
                             .collect()
                     };
 
-                    if json {
-                        // JSON output for piping to jq
-                        let json_agents: Vec<_> = agents
+                    // Build full JSON objects (used by json and toon formats)
+                    let build_full_json = |agents: &[botty::AgentInfo]| -> Vec<serde_json::Value> {
+                        agents
                             .iter()
                             .map(|a| {
                                 let mut obj = serde_json::json!({
@@ -315,7 +318,6 @@ async fn run_client(
                                     "size": { "rows": a.size.0, "cols": a.size.1 },
                                     "exit_code": a.exit_code,
                                 });
-                                // Include exit_reason if present
                                 if let Some(reason) = &a.exit_reason {
                                     obj["exit_reason"] = serde_json::json!(match reason {
                                         botty::ExitReason::Normal => "normal",
@@ -323,7 +325,6 @@ async fn run_client(
                                         botty::ExitReason::Killed => "killed",
                                     });
                                 }
-                                // Include limits if present
                                 if let Some(limits) = &a.limits {
                                     obj["limits"] = serde_json::json!({
                                         "timeout": limits.timeout,
@@ -332,38 +333,53 @@ async fn run_client(
                                 }
                                 obj
                             })
-                            .collect();
-                        println!("{}", serde_json::to_string(&json_agents)?);
-                    } else if agents.is_empty() {
-                        // Human-readable empty message
-                        if all {
-                            println!("(no agents)");
-                        } else {
-                            println!("(no agents currently active)");
+                            .collect()
+                    };
+
+                    match format.as_str() {
+                        "json" => {
+                            println!("{}", serde_json::to_string(&build_full_json(&agents))?);
                         }
-                    } else {
-                        // Default: TOON format (token-efficient for LLMs)
-                        let json_data = serde_json::json!({
-                            "agents": agents.iter().map(|a| {
-                                let mut agent_json = serde_json::json!({
-                                    "id": a.id,
-                                    "pid": a.pid,
-                                    "state": match a.state {
+                        "text" => {
+                            if agents.is_empty() {
+                                if all {
+                                    println!("(no agents)");
+                                } else {
+                                    println!("(no agents currently active)");
+                                }
+                            } else {
+                                // Columnar text output
+                                println!("{:<20} {:<8} {:<10} {}", "ID", "PID", "STATE", "COMMAND");
+                                for a in &agents {
+                                    let state = match a.state {
                                         botty::AgentState::Running => "running",
                                         botty::AgentState::Exited => "exited",
-                                    },
-                                    "command": a.command.join(" "),
-                                });
-                                // Only include labels if non-empty (keeps output compact)
-                                if !a.labels.is_empty() {
-                                    agent_json["labels"] = serde_json::json!(a.labels);
+                                    };
+                                    let cmd = a.command.join(" ");
+                                    let labels = if a.labels.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" [{}]", a.labels.join(","))
+                                    };
+                                    println!("{:<20} {:<8} {:<10} {}{}", a.id, a.pid, state, cmd, labels);
                                 }
-                                agent_json
-                            }).collect::<Vec<_>>()
-                        });
-                        let toon = toon_format::encode(&json_data, &toon_format::EncodeOptions::default())
-                            .unwrap_or_else(|_| format!("{json_data:?}"));
-                        println!("{toon}");
+                            }
+                        }
+                        _ => {
+                            // Default: TOON format (token-efficient for LLMs)
+                            if agents.is_empty() {
+                                if all {
+                                    println!("(no agents)");
+                                } else {
+                                    println!("(no agents currently active)");
+                                }
+                            } else {
+                                let json_data = serde_json::json!({ "agents": build_full_json(&agents) });
+                                let toon = toon_format::encode(&json_data, &toon_format::EncodeOptions::default())
+                                    .unwrap_or_else(|_| format!("{json_data:?}"));
+                                println!("{toon}");
+                            }
+                        }
                     }
                 }
                 Response::Error { message } => {
@@ -1318,9 +1334,6 @@ async fn run_view_command(
         }
         view.create_session()?;
 
-        // Set up command palette (Ctrl+P)
-        setup_command_palette(&view)?;
-
         // Set up tmux hook for dynamic resizing when panes change
         if auto_resize {
             setup_resize_hook(&view, &mode)?;
@@ -1346,6 +1359,9 @@ async fn run_view_command(
         }
     }
 
+    // Bind Ctrl+P command palette before attaching (runs for both fresh and reattach)
+    setup_command_palette(&view)?;
+
     // Spawn a task to listen for events and manage panes
     let socket_path_clone = socket_path.clone();
     let existing_agents = current_agents.clone();
@@ -1358,6 +1374,11 @@ async fn run_view_command(
     // Attach to tmux (this blocks until user detaches or session ends)
     // Run in spawn_blocking so we don't block the async runtime
     let attach_result = tokio::task::spawn_blocking(move || view.attach()).await?;
+
+    // Unbind Ctrl+P so it doesn't leak into other tmux sessions
+    let _ = std::process::Command::new("tmux")
+        .args(["unbind-key", "-T", "root", "C-p"])
+        .status();
 
     // Abort the event loop task
     event_handle.abort();
@@ -1415,8 +1436,16 @@ async fn run_view_event_loop(
         if let Ok(response) = serde_json::from_str::<Response>(&line) {
             match response {
                 Response::Event(Event::AgentSpawned { id, .. }) => {
+                    let was_empty = view.is_empty();
                     if let Err(e) = view.add_pane(&id) {
                         tracing::warn!("Failed to add pane for {}: {}", id, e);
+                    }
+                    // When transitioning from placeholder to first real pane,
+                    // retile so it fills the window properly
+                    if was_empty {
+                        if let Err(e) = view.retile() {
+                            tracing::warn!("Failed to retile after placeholder transition: {}", e);
+                        }
                     }
                 }
                 Response::Event(Event::AgentExited { id, .. }) => {
@@ -1660,55 +1689,69 @@ fn setup_resize_hook(view: &TmuxView, mode: &str) -> Result<(), ViewError> {
     Ok(())
 }
 
-/// Set up a command palette accessible via Ctrl+P in the botty tmux session.
+/// Register botty commands as tmux command aliases and bind Ctrl+P.
+///
+/// Creates aliases like `botty-menu`, `botty-list`, `botty-snapshot`, etc.
+/// that can be invoked from the tmux command prompt (prefix+:) in any session.
+/// Also binds Ctrl+P to `botty-menu`, scoped to the botty session via if-shell.
 fn setup_command_palette(view: &TmuxView) -> Result<(), ViewError> {
     use std::process::Command;
 
     let botty_path = view.botty_path();
     let session_name = "botty";
 
-    // tmux display-menu takes triplets: label, shortcut-key, command
-    // An empty label "" creates a separator line.
-    // Pipe through `less -R` so the popup stays open until user presses q.
-    // (-E closes popup when less exits)
-    let list_cmd = format!(
-        "display-popup -h 75% -w 80% -E '{} list | less -R'",
+    // Register tmux command aliases (server-level, available from any session)
+    let list_alias = format!(
+        "botty-list=display-popup -h 75% -w 80% -E '{} list --format text | less -R'",
         botty_path
     );
-    let snapshot_cmd = format!(
-        "display-popup -h 75% -w 80% -E '{} snapshot #{{@agent_id}} | less -R'",
+    let snapshot_alias = format!(
+        "botty-snapshot=display-popup -h 75% -w 80% -E '{} snapshot --raw #{{@agent_id}} | less -R'",
         botty_path
     );
-    // Shutdown: stop the server, then detach from the tmux session
-    let shutdown_cmd = format!(
-        "display-popup -E '{} shutdown && tmux detach-client'",
+    let shutdown_alias = format!(
+        "botty-shutdown=display-popup -E '{} shutdown && tmux detach-client'",
         botty_path
     );
 
-    let menu_args: Vec<&str> = vec![
-        "display-menu",
-        "-T", "#[align=centre]botty",
-        "List Agents",    "l", &list_cmd,
-        "Snapshot Pane",  "s", &snapshot_cmd,
-        "",               "",  "",
-        "Refresh Layout", "r", "select-layout tiled",
-        "",               "",  "",
-        "Detach",         "d", "detach-client",
-        "Shutdown",       "S", &shutdown_cmd,
+    let aliases: &[(&str, &str)] = &[
+        ("command-alias[100]", "botty-menu=display-menu -T '#[align=centre]botty' \
+            'List Agents' l botty-list \
+            'Snapshot Pane' s botty-snapshot \
+            '' '' '' \
+            'Refresh Layout' r botty-refresh \
+            '' '' '' \
+            'Detach' d detach-client \
+            'Shutdown' S botty-shutdown"),
+        ("command-alias[101]", &list_alias),
+        ("command-alias[102]", &snapshot_alias),
+        ("command-alias[103]", &shutdown_alias),
+        ("command-alias[104]", "botty-refresh=select-layout tiled"),
     ];
 
-    // Bind Ctrl+P in root table (no prefix needed — panes are readonly)
-    let mut args = vec!["bind-key", "-T", "root", "C-p"];
-    args.extend_from_slice(&menu_args);
-    let _ = Command::new("tmux").args(&args).status();
+    for (key, value) in aliases {
+        let _ = Command::new("tmux")
+            .args(["set-option", "-s", key, value])
+            .status();
+    }
 
-    // Show a brief status message so users know the palette exists
+    // Bind Ctrl+P scoped to botty session: shows menu in botty, passes through elsewhere
+    let _ = Command::new("tmux")
+        .args([
+            "bind-key", "-T", "root", "C-p",
+            "if-shell", "-F", "#{==:#{session_name},botty}",
+            "botty-menu",
+            "send-keys C-p",
+        ])
+        .status();
+
+    // Show a brief status message
     let _ = Command::new("tmux")
         .args([
             "display-message",
             "-t", session_name,
             "-d", "3000",
-            "botty view — press Ctrl+P for command palette",
+            "botty view — Ctrl+P for menu, or prefix+: then botty-<tab>",
         ])
         .status();
 
