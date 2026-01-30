@@ -543,6 +543,46 @@ impl TmuxView {
         self.active_panes.clear();
     }
 
+    /// Discover panes that already exist in the tmux session.
+    /// Reads @agent_id from each pane and populates active_panes.
+    /// Returns the set of agent IDs found.
+    pub fn discover_existing_panes(&mut self) -> Result<HashSet<String>, ViewError> {
+        #[allow(clippy::literal_string_with_formatting_args)]
+        let format_str = "#{@agent_id}";
+
+        let output = match self.mode {
+            ViewMode::Panes => Command::new("tmux")
+                .args([
+                    "list-panes",
+                    "-t", &format!("{}:agents", self.session_name),
+                    "-F", format_str,
+                ])
+                .output()?,
+            ViewMode::Windows => Command::new("tmux")
+                .args([
+                    "list-panes",
+                    "-s",
+                    "-t", &self.session_name,
+                    "-F", format_str,
+                ])
+                .output()?,
+        };
+
+        let mut found = HashSet::new();
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let agent_id = line.trim();
+                if !agent_id.is_empty() {
+                    found.insert(agent_id.to_string());
+                    self.active_panes.insert(agent_id.to_string());
+                }
+            }
+        }
+
+        Ok(found)
+    }
+
     /// Get the sizes of all panes/windows, keyed by agent ID.
     /// Uses @agent_id pane option which is immune to programs overwriting titles.
     /// Returns a map of agent_id -> (rows, cols).

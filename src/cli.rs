@@ -422,6 +422,10 @@ pub enum Command {
         /// Filter to agents with these labels (can be repeated, matches agents with ALL labels).
         #[arg(long, short)]
         label: Vec<String>,
+
+        /// Destroy and recreate the tmux session instead of reattaching.
+        #[arg(long)]
+        new_session: bool,
     },
 
     /// Resize an agent's terminal.

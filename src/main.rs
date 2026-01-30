@@ -240,9 +240,9 @@ async fn run_client(
     }
 
     // View command manages tmux session
-    if let Command::View { mux, mode, no_resize, label } = command {
+    if let Command::View { mux, mode, no_resize, label, new_session } = command {
         let auto_resize = !no_resize; // auto-resize is now the default
-        return run_view_command(socket_path, mux, mode, auto_resize, label).await;
+        return run_view_command(socket_path, mux, mode, auto_resize, label, new_session).await;
     }
 
     // ResizePanes command (called from tmux hook)
@@ -1217,6 +1217,7 @@ async fn run_view_command(
     mode: String,
     auto_resize: bool,
     labels: Vec<String>,
+    new_session: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use botty::ViewMode;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1297,39 +1298,52 @@ async fn run_view_command(
         _ => return Err("unexpected response to list".into()),
     };
 
-    // Kill any existing session and create fresh
-    // (old sessions may have stale panes from killed agents)
-    if view.session_exists() {
-        view.kill_session()?;
-    }
-    view.create_session()?;
+    if view.session_exists() && !new_session {
+        // Reattach: session already exists, just reconcile panes
+        tracing::info!("Reattaching to existing botty session");
 
-    // Set up command palette (prefix+P / F1)
-    setup_command_palette(&view)?;
+        let existing_panes = view.discover_existing_panes()?;
 
-    // Set up tmux hook for dynamic resizing when panes change (only if auto_resize enabled)
-    if auto_resize {
-        setup_resize_hook(&view, &mode)?;
-    }
-
-    // Create panes for existing agents
-    for agent_id in &current_agents {
-        view.add_pane(agent_id)?;
-    }
-
-    // Resize agents to match their pane sizes (only if auto_resize enabled)
-    if auto_resize && !current_agents.is_empty() {
-        // Delay to let tmux finish creating panes and settling layout
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        
-        if let Err(e) = resize_agents_to_panes(&socket_path, &view).await {
-            tracing::warn!("Failed to resize agents: {}", e);
+        // Add panes for agents that are running but don't have a pane yet
+        // (spawned while we were detached)
+        for agent_id in &current_agents {
+            if !existing_panes.contains(agent_id) {
+                view.add_pane(agent_id)?;
+            }
         }
-    }
+    } else {
+        // Fresh session — kill stale session if --new-session was passed
+        if view.session_exists() {
+            view.kill_session()?;
+        }
+        view.create_session()?;
 
-    // If no agents, show the waiting placeholder
-    if current_agents.is_empty() {
-        view.show_waiting_placeholder()?;
+        // Set up command palette (Ctrl+P)
+        setup_command_palette(&view)?;
+
+        // Set up tmux hook for dynamic resizing when panes change
+        if auto_resize {
+            setup_resize_hook(&view, &mode)?;
+        }
+
+        // Create panes for existing agents
+        for agent_id in &current_agents {
+            view.add_pane(agent_id)?;
+        }
+
+        // Resize agents to match their pane sizes
+        if auto_resize && !current_agents.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            if let Err(e) = resize_agents_to_panes(&socket_path, &view).await {
+                tracing::warn!("Failed to resize agents: {}", e);
+            }
+        }
+
+        // If no agents, show the waiting placeholder
+        if current_agents.is_empty() {
+            view.show_waiting_placeholder()?;
+        }
     }
 
     // Spawn a task to listen for events and manage panes
