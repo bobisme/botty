@@ -58,9 +58,9 @@ pub enum Request {
         labels: Vec<String>,
     },
 
-    /// Kill an agent by ID, by labels, or all agents.
+    /// Kill an agent by ID, by labels, by process name, or all agents.
     Kill {
-        /// Agent ID (optional if using labels or all).
+        /// Agent ID (optional if using labels, proc_filter, or all).
         #[serde(default)]
         id: Option<String>,
         /// Kill all agents with these labels.
@@ -72,6 +72,9 @@ pub enum Request {
         /// Unix signal number (default: SIGTERM = 15).
         #[serde(default = "default_signal")]
         signal: i32,
+        /// Kill agents whose command matches this substring.
+        #[serde(default)]
+        proc_filter: Option<String>,
     },
 
     /// Send UTF-8 text input to an agent.
@@ -446,6 +449,7 @@ mod tests {
                 labels: vec![],
                 all: false,
                 signal: 9,
+                proc_filter: None,
             },
             Request::Send {
                 id: "test-agent".into(),

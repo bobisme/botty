@@ -187,7 +187,7 @@ async fn run_doctor(
     {
         Ok(Response::Spawned { id, .. }) => {
             // Kill it
-            match client.request(Request::Kill { id: Some(id.clone()), labels: vec![], all: false, signal: 9 }).await {
+            match client.request(Request::Kill { id: Some(id.clone()), labels: vec![], all: false, signal: 9, proc_filter: None }).await {
                 Ok(Response::Ok) => println!("[OK]"),
                 Ok(other) => {
                     println!("[FAIL] kill returned: {other:?}");
@@ -391,17 +391,17 @@ async fn run_client(
             }
         }
 
-        Command::Kill { id, label, all, term } => {
-            // Must specify either id, label, or all
-            if id.is_none() && label.is_empty() && !all {
-                return Err("must specify agent ID, --label, or --all".into());
+        Command::Kill { id, label, all, term, proc } => {
+            // Must specify either id, label, proc, or all
+            if id.is_none() && label.is_empty() && !all && proc.is_none() {
+                return Err("must specify agent ID, --label, --proc, or --all".into());
             }
-            // Can't combine --all with specific id or labels
-            if all && (id.is_some() || !label.is_empty()) {
-                return Err("--all cannot be combined with agent ID or --label".into());
+            // Can't combine --all with specific id, labels, or proc
+            if all && (id.is_some() || !label.is_empty() || proc.is_some()) {
+                return Err("--all cannot be combined with agent ID, --label, or --proc".into());
             }
             let signal = if term { 15 } else { 9 }; // SIGTERM or SIGKILL (default)
-            let request = Request::Kill { id, labels: label, all, signal };
+            let request = Request::Kill { id, labels: label, all, signal, proc_filter: proc };
             let response = client.request(request).await?;
 
             match response {
@@ -856,6 +856,7 @@ async fn run_client(
                         labels: vec![],
                         all: false,
                         signal: 9,
+                        proc_filter: None,
                     })
                     .await;
                 return Err(message.into());
@@ -876,6 +877,7 @@ async fn run_client(
                             labels: vec![],
                             all: false,
                             signal: 9,
+                            proc_filter: None,
                         })
                         .await;
                     return Err("timeout waiting for command completion".into());
@@ -930,6 +932,7 @@ async fn run_client(
                                             labels: vec![],
                                             all: false,
                                             signal: 9,
+                                            proc_filter: None,
                                         })
                                         .await;
                                     if !output.is_empty() {
@@ -952,6 +955,7 @@ async fn run_client(
                     labels: vec![],
                     all: false,
                     signal: 9,
+                    proc_filter: None,
                 })
                 .await;
 
@@ -1342,6 +1346,9 @@ async fn run_view_command(
             setup_resize_hook(&view, &mode)?;
         }
 
+        // Set up pane-died hook to clean up dead panes
+        setup_pane_died_hook(&view)?;
+
         // Create panes for existing agents
         for agent in &current_agents {
             view.add_pane(&agent.id)?;
@@ -1688,6 +1695,42 @@ fn setup_resize_hook(view: &TmuxView, mode: &str) -> Result<(), ViewError> {
             &session_window,
             "window-layout-changed",
             &run_shell,
+        ])
+        .status();
+
+    Ok(())
+}
+
+/// Set up tmux hook to clean up dead panes when agents exit.
+///
+/// Enables `remain-on-exit` so tmux fires the `pane-died` hook instead of
+/// immediately destroying panes. The hook then either kills the dead pane
+/// (if other panes exist) or respawns it as a "waiting for agents" placeholder
+/// (if it's the last pane, to keep the session alive).
+///
+/// Scoped to the botty session — does not affect other tmux sessions.
+fn setup_pane_died_hook(_view: &TmuxView) -> Result<(), ViewError> {
+    use std::process::Command;
+
+    let session_name = "botty";
+
+    // Enable remain-on-exit so pane-died hook fires (instead of pane being
+    // destroyed immediately, which would skip the hook entirely)
+    let _ = Command::new("tmux")
+        .args([
+            "set-option", "-t", session_name,
+            "remain-on-exit", "on",
+        ])
+        .status();
+
+    // pane-died hook: if last pane, respawn as placeholder; otherwise kill the dead pane.
+    // tmux sets the target to the dead pane, so kill-pane/respawn-pane act on it.
+    let hook_cmd = r#"if-shell -F '#{==:#{window_panes},1}' "respawn-pane -k 'printf \"\\033[2J\\033[H\\033[90mWaiting for agents...\\033[0m\"; sleep 3600'" 'kill-pane'"#;
+
+    let _ = Command::new("tmux")
+        .args([
+            "set-hook", "-t", session_name,
+            "pane-died", hook_cmd,
         ])
         .status();
 

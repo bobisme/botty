@@ -410,15 +410,15 @@ async fn handle_request(
             Response::Agents { agents }
         }
 
-        Request::Kill { id, labels, all, signal } => {
+        Request::Kill { id, labels, all, signal, proc_filter } => {
             // Validate signal number - only allow standard signals (1-31)
             // Real-time signals (32-64) and invalid numbers are rejected
             if !(1..=31).contains(&signal) {
                 return Response::error(format!("invalid signal number: {signal} (must be 1-31)"));
             }
-            
+
             let mgr = manager.lock().await;
-            
+
             // Determine which agents to kill
             let targets: Vec<String> = if let Some(ref agent_id) = id {
                 // Kill by specific ID
@@ -429,22 +429,41 @@ async fn handle_request(
                     .filter(|a| a.is_running())
                     .map(|a| a.id.clone())
                     .collect()
-            } else if !labels.is_empty() {
-                // Kill by labels
+            } else if proc_filter.is_some() || !labels.is_empty() {
+                // Kill by proc filter and/or labels (AND logic when both specified)
                 mgr.list()
-                    .filter(|a| a.is_running() && a.has_labels(&labels))
+                    .filter(|a| {
+                        if !a.is_running() {
+                            return false;
+                        }
+                        if !labels.is_empty() && !a.has_labels(&labels) {
+                            return false;
+                        }
+                        if let Some(ref pf) = proc_filter {
+                            if !a.command.join(" ").contains(pf.as_str()) {
+                                return false;
+                            }
+                        }
+                        true
+                    })
                     .map(|a| a.id.clone())
                     .collect()
             } else {
-                return Response::error("must specify agent ID, --label, or --all");
+                return Response::error("must specify agent ID, --label, --proc, or --all");
             };
-            
+
             if targets.is_empty() {
                 if id.is_some() {
                     return Response::error(format!("agent not found: {}", id.unwrap()));
                 }
                 if all {
                     return Response::error("no running agents to kill");
+                }
+                if proc_filter.is_some() && !labels.is_empty() {
+                    return Response::error("no agents match the specified process filter and labels");
+                }
+                if proc_filter.is_some() {
+                    return Response::error("no agents match the specified process filter");
                 }
                 return Response::error("no agents match the specified labels");
             }

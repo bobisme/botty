@@ -396,6 +396,7 @@ impl AgentHandle {
             labels: vec![],
             all: false,
             signal,
+            proc_filter: None,
         };
 
         let response = self

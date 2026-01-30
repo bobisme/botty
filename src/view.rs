@@ -208,12 +208,11 @@ impl TmuxView {
         // 2. Streams live PTY output in raw mode
         // 3. Properly handles cursor positioning and scroll regions
         //
-        // Wrap in a script that shows "exited" message after, preventing the pane from
-        // dying immediately (which would kill the session if it's the last pane).
-        // The event loop will respawn this pane with placeholder or remove it.
-        // Use a shorter sleep (5 min) to limit resource usage if event loop fails.
+        // Pane runs attach --readonly, which exits when the agent exits.
+        // Dead pane cleanup is handled by the tmux pane-died hook
+        // (set up in setup_pane_died_hook), not by a sleep wrapper.
         let tail_cmd = format!(
-            "{} attach --readonly {}; printf '\\033[2J\\033[H\\033[90m[exited]\\033[0m'; sleep 300",
+            "{} attach --readonly {}",
             self.botty_path, agent_id
         );
 

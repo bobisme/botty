@@ -182,9 +182,9 @@ pub enum Command {
         json: bool,
     },
 
-    /// Kill an agent (or all agents matching labels).
+    /// Kill an agent (or all agents matching labels/process name).
     Kill {
-        /// Agent ID (optional if using --label or --all).
+        /// Agent ID (optional if using --label, --proc, or --all).
         id: Option<String>,
 
         /// Kill all agents with these labels (can be repeated, matches agents with ALL labels).
@@ -198,6 +198,10 @@ pub enum Command {
         /// Send SIGTERM instead of SIGKILL (for graceful shutdown).
         #[arg(long)]
         term: bool,
+
+        /// Kill agents whose command contains this substring (e.g., --proc htop).
+        #[arg(long, short)]
+        proc: Option<String>,
     },
 
     /// Send input to an agent.

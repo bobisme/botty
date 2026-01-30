@@ -117,6 +117,7 @@ async fn test_spawn_and_list() {
             labels: vec![],
             all: false,
             signal: 15,
+            proc_filter: None,
         })
         .await
         .expect("kill failed");
@@ -210,6 +211,7 @@ async fn test_spawn_send_snapshot() {
             labels: vec![],
             all: false,
             signal: 9,
+            proc_filter: None,
         })
         .await;
     let _ = client.request(Request::Shutdown).await;
@@ -325,6 +327,7 @@ async fn test_screen_cursor_movement() {
             labels: vec![],
             all: false,
             signal: 9,
+            proc_filter: None,
         })
         .await;
     let _ = client.request(Request::Shutdown).await;
@@ -401,6 +404,7 @@ async fn test_transcript_tail() {
             labels: vec![],
             all: false,
             signal: 9,
+            proc_filter: None,
         })
         .await;
     let _ = client.request(Request::Shutdown).await;
@@ -501,6 +505,7 @@ async fn test_attach_and_detach() {
             labels: vec![],
             all: false,
             signal: 9,
+            proc_filter: None,
         })
         .await;
     let _ = client.request(Request::Shutdown).await;
@@ -581,6 +586,7 @@ async fn test_attach_readonly_mode() {
             labels: vec![],
             all: false,
             signal: 9,
+            proc_filter: None,
         })
         .await;
     let _ = client.request(Request::Shutdown).await;
@@ -727,6 +733,7 @@ async fn test_attach_receives_output() {
             labels: vec![],
             all: false,
             signal: 9,
+            proc_filter: None,
         })
         .await;
     let _ = client.request(Request::Shutdown).await;
@@ -876,6 +883,7 @@ async fn test_kill_all() {
             labels: vec![],
             all: true,
             signal: 9,
+            proc_filter: None,
         })
         .await
         .expect("kill --all failed");
@@ -923,6 +931,7 @@ async fn test_kill_all_no_agents() {
             labels: vec![],
             all: true,
             signal: 9,
+            proc_filter: None,
         })
         .await
         .expect("request failed");

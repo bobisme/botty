@@ -36,7 +36,13 @@ fuzz_target!(|req: FuzzRequest| {
         FuzzRequest::Spawn { cmd, rows, cols } => {
             botty::protocol::Request::Spawn { cmd, rows, cols }
         }
-        FuzzRequest::Kill { id, signal } => botty::protocol::Request::Kill { id, signal },
+        FuzzRequest::Kill { id, signal } => botty::protocol::Request::Kill {
+            id: Some(id),
+            labels: vec![],
+            all: false,
+            signal,
+            proc_filter: None,
+        },
         FuzzRequest::Send { id, data, newline } => {
             botty::protocol::Request::Send { id, data, newline }
         }
