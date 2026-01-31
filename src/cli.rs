@@ -226,15 +226,15 @@ pub enum Command {
         hex: String,
     },
 
-    /// Send a named key sequence to an agent.
+    /// Send named key sequences to an agent.
     ///
     /// Supports arrow keys (up/down/left/right), special keys (enter/tab/escape),
     /// control sequences (ctrl-c/ctrl-d), and more. See --help for full list.
-    SendKey {
+    SendKeys {
         /// Agent ID.
         id: String,
 
-        /// Key name (e.g., "up", "down", "enter", "ctrl-c", "tab").
+        /// Key names separated by spaces (e.g., "up", "down enter", "ctrl-c").
         ///
         /// Supported keys:
         /// - Arrow keys: up, down, left, right
@@ -243,7 +243,7 @@ pub enum Command {
         /// - Control: ctrl-c, ctrl-d, etc.
         /// - Function: f1, f2, f3, f4
         /// - Single chars: a, b, x, etc.
-        key: String,
+        keys: Vec<String>,
     },
 
     /// Tail agent output.

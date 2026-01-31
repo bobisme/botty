@@ -466,20 +466,22 @@ async fn run_client(
             }
         }
 
-        Command::SendKey { id, key } => {
+        Command::SendKeys { id, keys } => {
             use botty::parse_key_sequence;
-            let data = parse_key_sequence(&key)
-                .ok_or_else(|| format!("unknown key: {key}"))?;
-            let request = Request::SendBytes { id, data };
-            let response = client.request(request).await?;
+            for key in keys {
+                let data = parse_key_sequence(&key)
+                    .ok_or_else(|| format!("unknown key: {key}"))?;
+                let request = Request::SendBytes { id: id.clone(), data };
+                let response = client.request(request).await?;
 
-            match response {
-                Response::Ok => {}
-                Response::Error { message } => {
-                    return Err(message.into());
-                }
-                _ => {
-                    return Err("unexpected response".into());
+                match response {
+                    Response::Ok => {}
+                    Response::Error { message } => {
+                        return Err(message.into());
+                    }
+                    _ => {
+                        return Err("unexpected response".into());
+                    }
                 }
             }
         }

@@ -521,35 +521,41 @@ fn test_send_key() {
 
     std::thread::sleep(Duration::from_millis(200));
 
-    // Send arrow keys and special keys - should all succeed
+    // Send single keys - should all succeed
     env.botty()
-        .args(["send-key", &agent_id, "up"])
+        .args(["send-keys", &agent_id, "up"])
         .assert()
         .success();
 
     env.botty()
-        .args(["send-key", &agent_id, "down"])
+        .args(["send-keys", &agent_id, "down"])
         .assert()
         .success();
 
     env.botty()
-        .args(["send-key", &agent_id, "enter"])
+        .args(["send-keys", &agent_id, "enter"])
         .assert()
         .success();
 
     env.botty()
-        .args(["send-key", &agent_id, "tab"])
+        .args(["send-keys", &agent_id, "tab"])
         .assert()
         .success();
 
     env.botty()
-        .args(["send-key", &agent_id, "ctrl-c"])
+        .args(["send-keys", &agent_id, "ctrl-c"])
+        .assert()
+        .success();
+
+    // Send multiple keys at once
+    env.botty()
+        .args(["send-keys", &agent_id, "up", "down", "enter"])
         .assert()
         .success();
 
     // Invalid key name should fail
     env.botty()
-        .args(["send-key", &agent_id, "invalid-key"])
+        .args(["send-keys", &agent_id, "invalid-key"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("unknown key"));
