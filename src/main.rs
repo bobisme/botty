@@ -1583,6 +1583,32 @@ async fn run_view_command(
     // If attach failed, return the error
     attach_result?;
 
+    // After detach, check if there are any running agents
+    // If not, clean up the server and tmux session
+    let mut client = Client::new(socket_path.clone());
+    let response = client.request(Request::List { labels: vec![] }).await?;
+
+    if let Response::Agents { agents } = response {
+        let running_count = agents
+            .iter()
+            .filter(|a| matches!(a.state, botty::AgentState::Running))
+            .count();
+
+        if running_count == 0 {
+            tracing::info!("No agents running after detach - shutting down server and cleaning up tmux session");
+
+            // Request server shutdown
+            let _ = client.request(Request::Shutdown).await;
+
+            // Kill tmux session (hardcoded to "botty" for now - see bd-1tr for unique names)
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-session", "-t", "botty"])
+                .status();
+        } else {
+            tracing::debug!("Agents still running after detach - leaving server and session active");
+        }
+    }
+
     Ok(())
 }
 

@@ -231,7 +231,17 @@ async fn handle_connection(
                     debug!("Attach session ended normally");
                 }
                 Err(e) => {
-                    warn!("Attach session error: {}", e);
+                    // Broken pipe is expected when tmux session is killed (e.g., view --new-session)
+                    // Don't warn about it - just log at debug level
+                    if let ServerError::Io(ref io_err) = e {
+                        if io_err.kind() == std::io::ErrorKind::BrokenPipe {
+                            debug!("Attach session ended: broken pipe (expected when tmux kills pane)");
+                        } else {
+                            warn!("Attach session error: {}", e);
+                        }
+                    } else {
+                        warn!("Attach session error: {}", e);
+                    }
                 }
             }
             // After attach, the connection is done
