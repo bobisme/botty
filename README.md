@@ -96,9 +96,12 @@ botty spawn --label batch --timeout 60 -- make test  # labels + auto-kill
 botty list                    # running agents (toon format for LLMs)
 botty list --format json      # JSON output
 botty snapshot <id>           # current screen contents
+botty snapshot --raw <id>     # with ANSI colors preserved
 botty tail <id>               # last N lines of transcript
 botty tail <id> --follow      # stream output
 ```
+
+![botty snapshot --raw showing a TUI program](images/snapshot.png)
 
 ### Killing
 
