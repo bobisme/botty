@@ -291,6 +291,10 @@ pub enum Command {
         /// Include ANSI color codes.
         #[arg(long)]
         raw: bool,
+
+        /// Compare with previous snapshot file and show diff.
+        #[arg(long)]
+        diff: Option<String>,
     },
 
     /// Attach to an agent interactively.
@@ -347,6 +351,31 @@ pub enum Command {
         /// Print the snapshot when condition is met.
         #[arg(long, short)]
         print: bool,
+    },
+
+    /// Assert that agent output matches a condition.
+    ///
+    /// Exits with code 0 if assertion passes, code 1 if it fails.
+    /// Prints clear error message on failure showing expected vs actual.
+    Assert {
+        /// Agent ID.
+        id: String,
+
+        /// Assert output contains this string.
+        #[arg(long)]
+        contains: Option<String>,
+
+        /// Assert output does NOT contain this string.
+        #[arg(long)]
+        not_contains: Option<String>,
+
+        /// Assert output matches this regex pattern.
+        #[arg(long)]
+        pattern: Option<String>,
+
+        /// Timeout in seconds (default: check immediately).
+        #[arg(long, short, default_value = "0")]
+        timeout: u64,
     },
 
     /// Execute a command and return its output.

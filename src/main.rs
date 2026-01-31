@@ -645,7 +645,7 @@ async fn run_client(
             }
         }
 
-        Command::Snapshot { id, raw } => {
+        Command::Snapshot { id, raw, diff } => {
             let request = Request::Snapshot {
                 id,
                 strip_colors: !raw,
@@ -654,7 +654,42 @@ async fn run_client(
 
             match response {
                 Response::Snapshot { content, .. } => {
-                    println!("{content}");
+                    if let Some(diff_file) = diff {
+                        // Validate path to prevent path traversal
+                        let diff_path = std::path::Path::new(&diff_file);
+
+                        // Reject paths with .. components
+                        if diff_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                            return Err("path traversal not allowed (.. in path)".into());
+                        }
+
+                        // Read previous snapshot
+                        let previous = std::fs::read_to_string(diff_path)
+                            .map_err(|e| format!("failed to read {diff_file}: {e}"))?;
+
+                        // Compare snapshots
+                        if content == previous {
+                            println!("No changes");
+                            return Ok(());
+                        }
+
+                        // Show unified diff
+                        use similar::{ChangeTag, TextDiff};
+                        let diff = TextDiff::from_lines(&previous, &content);
+
+                        for change in diff.iter_all_changes() {
+                            let sign = match change.tag() {
+                                ChangeTag::Delete => "-",
+                                ChangeTag::Insert => "+",
+                                ChangeTag::Equal => " ",
+                            };
+                            print!("{sign}{change}");
+                        }
+
+                        std::process::exit(1);
+                    } else {
+                        println!("{content}");
+                    }
                 }
                 Response::Error { message } => {
                     return Err(message.into());
@@ -741,6 +776,10 @@ async fn run_client(
                 // Check pattern condition
                 if let Some(ref pat) = pattern {
                     any_condition_specified = true;
+                    // Limit pattern length to mitigate ReDoS
+                    if pat.len() > 1000 {
+                        return Err("regex pattern too long (max 1000 chars)".into());
+                    }
                     let re = Regex::new(pat).map_err(|e| format!("invalid regex: {e}"))?;
                     if !re.is_match(&snapshot) {
                         all_conditions_met = false;
@@ -783,6 +822,151 @@ async fn run_client(
 
                 last_snapshot = snapshot;
                 tokio::time::sleep(poll_interval).await;
+            }
+        }
+
+        Command::Assert {
+            id,
+            contains,
+            not_contains,
+            pattern,
+            timeout,
+        } => {
+            use regex::Regex;
+            use std::time::{Duration, Instant};
+
+            let timeout_duration = Duration::from_secs(timeout);
+            let poll_interval = Duration::from_millis(50);
+            let deadline = if timeout > 0 {
+                Some(Instant::now() + timeout_duration)
+            } else {
+                None
+            };
+
+            let response = client
+                .request(Request::Snapshot {
+                    id: id.clone(),
+                    strip_colors: true,
+                })
+                .await?;
+
+            let mut snapshot = match response {
+                Response::Snapshot { content, .. } => content,
+                Response::Error { message } => return Err(message.into()),
+                _ => return Err("unexpected response".into()),
+            };
+
+            // If timeout specified, poll until conditions met or timeout
+            if let Some(deadline_time) = deadline {
+                loop {
+                    // Check all conditions
+                    let mut all_passed = true;
+                    let mut failure_reason = String::new();
+
+                    // Check contains
+                    if let Some(ref needle) = contains {
+                        if !snapshot.contains(needle) {
+                            all_passed = false;
+                            failure_reason = format!("expected output to contain: {needle:?}");
+                        }
+                    }
+
+                    // Check not_contains
+                    if all_passed {
+                        if let Some(ref needle) = not_contains {
+                            if snapshot.contains(needle) {
+                                all_passed = false;
+                                failure_reason = format!("expected output NOT to contain: {needle:?}");
+                            }
+                        }
+                    }
+
+                    // Check pattern
+                    if all_passed {
+                        if let Some(ref pat) = pattern {
+                            // Limit pattern length to mitigate ReDoS
+                            if pat.len() > 1000 {
+                                return Err("regex pattern too long (max 1000 chars)".into());
+                            }
+                            let re = Regex::new(pat).map_err(|e| format!("invalid regex: {e}"))?;
+                            if !re.is_match(&snapshot) {
+                                all_passed = false;
+                                failure_reason = format!("expected output to match pattern: {pat:?}");
+                            }
+                        }
+                    }
+
+                    if all_passed {
+                        return Ok(());
+                    }
+
+                    if Instant::now() >= deadline_time {
+                        eprintln!("Assertion failed: {failure_reason}");
+                        eprintln!("\nActual output:");
+                        eprintln!("{snapshot}");
+                        std::process::exit(1);
+                    }
+
+                    tokio::time::sleep(poll_interval).await;
+
+                    // Get new snapshot
+                    let response = client
+                        .request(Request::Snapshot {
+                            id: id.clone(),
+                            strip_colors: true,
+                        })
+                        .await?;
+
+                    snapshot = match response {
+                        Response::Snapshot { content, .. } => content,
+                        Response::Error { message } => return Err(message.into()),
+                        _ => return Err("unexpected response".into()),
+                    };
+                }
+            } else {
+                // No timeout - check immediately
+                let mut all_passed = true;
+                let mut failure_reason = String::new();
+
+                // Check contains
+                if let Some(ref needle) = contains {
+                    if !snapshot.contains(needle) {
+                        all_passed = false;
+                        failure_reason = format!("expected output to contain: {needle:?}");
+                    }
+                }
+
+                // Check not_contains
+                if all_passed {
+                    if let Some(ref needle) = not_contains {
+                        if snapshot.contains(needle) {
+                            all_passed = false;
+                            failure_reason = format!("expected output NOT to contain: {needle:?}");
+                        }
+                    }
+                }
+
+                // Check pattern
+                if all_passed {
+                    if let Some(ref pat) = pattern {
+                        // Limit pattern length to mitigate ReDoS
+                        if pat.len() > 1000 {
+                            return Err("regex pattern too long (max 1000 chars)".into());
+                        }
+                        let re = Regex::new(pat).map_err(|e| format!("invalid regex: {e}"))?;
+                        if !re.is_match(&snapshot) {
+                            all_passed = false;
+                            failure_reason = format!("expected output to match pattern: {pat:?}");
+                        }
+                    }
+                }
+
+                if !all_passed {
+                    eprintln!("Assertion failed: {failure_reason}");
+                    eprintln!("\nActual output:");
+                    eprintln!("{snapshot}");
+                    std::process::exit(1);
+                }
             }
         }
 
