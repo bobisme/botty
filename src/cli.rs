@@ -277,6 +277,11 @@ pub enum Command {
     /// Send text to an agent (literal, no newline by default).
     /// Use --newline to append a newline character, or --enter to append
     /// a carriage return (like pressing Enter in a terminal).
+    ///
+    /// The submit key is written separately from the text, after a short
+    /// pause, so full-screen TUIs register it as a keypress instead of
+    /// absorbing it into the composer as pasted content. Tune the pause with
+    /// --submit-delay-ms.
     Send {
         /// Agent ID.
         id: String,
@@ -291,6 +296,14 @@ pub enum Command {
         /// Append Enter key (CR) after the text. Equivalent to send-keys enter.
         #[arg(short = 'e', long)]
         enter: bool,
+
+        /// Milliseconds to wait before the --newline/--enter key (default: 50).
+        ///
+        /// Raise it for a TUI that still swallows the key; set 0 to write the
+        /// key immediately after the text, which is safe for shells and other
+        /// line-oriented programs.
+        #[arg(long, value_name = "MS")]
+        submit_delay_ms: Option<u64>,
 
         /// Output format: text, json, or pretty.
         #[arg(long)]

@@ -4,6 +4,8 @@ use super::screen::Screen;
 use super::transcript::Transcript;
 use crate::protocol::{ExitReason, RecordedCommand, ResourceLimits};
 use crate::pty::PtyProcess;
+use crate::runtime::sync::Mutex;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Internal agent state (different from `protocol::AgentState` for internal tracking).
@@ -56,6 +58,16 @@ pub struct Agent {
     pub recording: bool,
     /// Recorded commands (populated when `recording` is true).
     pub recorded_commands: Vec<RecordedCommand>,
+    /// Serializes writes to this agent's PTY.
+    ///
+    /// A `send` can take a while — a payload larger than the PTY input buffer
+    /// needs several `write(2)` calls, and `--enter` deliberately pauses before
+    /// the submit key. That work must happen with the manager lock released,
+    /// or the PTY reader task cannot drain output and a child that blocks
+    /// writing its echo will never read the rest of our payload. This lock
+    /// keeps concurrent senders from interleaving bytes into each other's
+    /// payloads once the manager lock is gone.
+    pub write_lock: Arc<Mutex<()>>,
 }
 
 impl Agent {
@@ -98,6 +110,7 @@ impl Agent {
             no_resize,
             recording: record,
             recorded_commands: Vec::new(),
+            write_lock: Arc::new(Mutex::new(())),
         }
     }
 

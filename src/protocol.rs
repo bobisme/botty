@@ -134,6 +134,13 @@ pub enum Request {
         /// Whether to append Enter key (CR).
         #[serde(default)]
         enter: bool,
+        /// Milliseconds to wait between the text write and the submit key
+        /// write. `None` uses [`DEFAULT_SUBMIT_DELAY_MS`]; `Some(0)` writes the
+        /// key immediately after the text (still a separate `write(2)`).
+        ///
+        /// Only meaningful when `newline` or `enter` is set.
+        #[serde(default)]
+        submit_delay_ms: Option<u64>,
     },
 
     /// Send raw bytes to an agent.
@@ -486,6 +493,22 @@ const fn default_true() -> bool {
     true
 }
 
+/// Default gap, in milliseconds, between writing a `Send` payload and writing
+/// its submit key (`--newline` / `--enter`).
+///
+/// Full-screen TUIs (codex, claude, and anything else built on a composer
+/// widget) classify input by arrival timing: bytes that land in a single burst
+/// are treated as a paste and inserted as literal content, not as keypresses.
+/// A trailing CR/LF in the same `write(2)` as the text is therefore swallowed
+/// into the composer instead of submitting it, and the prompt sits there
+/// looking delivered. Splitting the key into its own write after a pause puts
+/// it outside the burst, so it reads as a real keypress.
+///
+/// 50ms clears the paste-detection window of the TUIs tested while staying
+/// below human-perceptible latency. Callers that know their target is a
+/// line-oriented program (a shell) can pass `Some(0)` to skip the wait.
+pub const DEFAULT_SUBMIT_DELAY_MS: u64 = 50;
+
 /// Maximum length, in bytes, of a base64-encoded `SendBytes` payload accepted
 /// during deserialization.
 ///
@@ -563,6 +586,7 @@ mod tests {
                 data: "hello\n".into(),
                 newline: false,
                 enter: false,
+                submit_delay_ms: None,
             },
             Request::SendBytes {
                 id: "test-agent".into(),
@@ -602,6 +626,27 @@ mod tests {
             let parsed: Request = serde_json::from_str(&json).expect("deserialize");
             let json2 = serde_json::to_string(&parsed).expect("re-serialize");
             assert_eq!(json, json2, "roundtrip failed for {:?}", req);
+        }
+    }
+
+    #[test]
+    fn test_send_without_submit_delay_defaults_to_none() {
+        // A client built before submit_delay_ms existed omits the field; it
+        // must still deserialize and fall back to DEFAULT_SUBMIT_DELAY_MS.
+        let json = r#"{"type":"send","id":"a","data":"hi","newline":true}"#;
+        let parsed: Request = serde_json::from_str(json).expect("deserialize");
+        match parsed {
+            Request::Send {
+                submit_delay_ms,
+                newline,
+                enter,
+                ..
+            } => {
+                assert_eq!(submit_delay_ms, None);
+                assert!(newline);
+                assert!(!enter);
+            }
+            other => panic!("expected Send, got {other:?}"),
         }
     }
 

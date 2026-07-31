@@ -198,6 +198,9 @@ impl AgentHandle {
             data: text.to_string(),
             newline,
             enter: false,
+            // Default delay: harnesses drive TUIs as often as shells, so be
+            // correct by default rather than 50ms faster.
+            submit_delay_ms: None,
         };
 
         let response = self

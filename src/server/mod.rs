@@ -38,7 +38,7 @@ use nix::sys::signal::Signal;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -308,6 +308,69 @@ impl Server {
 /// the default transcript cap and is ~1000x the 1 KiB chunks `attach` forwards,
 /// so legitimate requests are unaffected.
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// Maximum time spent flushing one PTY write before reporting failure.
+///
+/// Only reached when the child has stopped draining its stdin entirely; a
+/// child that is merely slow makes progress on each retry and finishes well
+/// inside this budget.
+const PTY_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Backoff between retries while the PTY input buffer is full.
+const PTY_WRITE_RETRY: Duration = Duration::from_millis(1);
+
+/// Duplicate an agent's PTY master fd for use after the manager lock is gone.
+///
+/// The `dup(2)` matters for lifetime, not just convenience: once the lock is
+/// released the agent can be killed and reaped, closing the original fd.
+/// Holding an independent descriptor means a late write fails with `EBADF` or
+/// `EIO` instead of landing on whatever unrelated file inherited the recycled
+/// descriptor number.
+fn dup_pty_fd(agent: &Agent) -> Result<std::os::fd::OwnedFd, String> {
+    nix::unistd::dup(crate::sys::borrow_fd(agent.pty.master_fd()))
+        .map_err(|e| format!("failed to duplicate PTY descriptor: {e}"))
+}
+
+/// Write every byte of `buf` to a PTY master.
+///
+/// The master fd is non-blocking (see [`pty::spawn`]), so one `write(2)` may
+/// accept fewer bytes than requested — a PTY's input buffer is only a few KiB,
+/// smaller than a pasted prompt — or fail with `EAGAIN` when the child has not
+/// drained it yet. Treating either as success silently truncates the payload,
+/// so retry until the whole buffer is accepted.
+///
+/// Must be called with the manager lock released: draining the child's output
+/// requires that lock, and a child blocked writing its echo will not read the
+/// rest of our payload until it drains.
+async fn write_all_pty(fd: &std::os::fd::OwnedFd, buf: &[u8]) -> Result<(), String> {
+    let deadline = Instant::now() + PTY_WRITE_TIMEOUT;
+    let mut written = 0;
+
+    while written < buf.len() {
+        match nix::unistd::write(fd, &buf[written..]) {
+            Ok(0) => {
+                return Err(format!(
+                    "write failed: PTY accepted 0 of {} remaining bytes",
+                    buf.len() - written
+                ));
+            }
+            Ok(n) => written += n,
+            Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "write timed out after {}s: PTY accepted {written} of {} bytes",
+                        PTY_WRITE_TIMEOUT.as_secs(),
+                        buf.len()
+                    ));
+                }
+                crate::runtime::time::sleep(PTY_WRITE_RETRY).await;
+            }
+            Err(e) => return Err(format!("write failed: {e}")),
+        }
+    }
+
+    Ok(())
+}
 
 /// Error from [`FrameReader::next_frame`].
 enum FrameError {
@@ -836,51 +899,78 @@ async fn handle_request(
             data,
             newline,
             enter,
+            submit_delay_ms,
         } => {
-            let mut mgr = manager.lock().await;
-            if let Some(agent) = mgr.get_mut(&id) {
-                // Record the command before sending
-                let payload = if newline || enter {
-                    format!("{data}\n")
-                } else {
+            // The submit key goes out in its own write(2), after a pause, so
+            // the TUI sees a keypress rather than a newline buried in a pasted
+            // burst. See DEFAULT_SUBMIT_DELAY_MS.
+            let mut submit_key = Vec::new();
+            if newline {
+                submit_key.push(b'\n');
+            }
+            if enter {
+                submit_key.push(b'\r');
+            }
+
+            // Take the fd and the per-agent write lock, then release the
+            // manager lock before writing: the writes below can block on a
+            // full PTY buffer, and draining that buffer needs this same lock.
+            let (fd, write_lock) = {
+                let mut mgr = manager.lock().await;
+                let Some(agent) = mgr.get_mut(&id) else {
+                    return Response::error(format!("agent not found: {id}"));
+                };
+
+                let payload = if submit_key.is_empty() {
                     data.clone()
+                } else {
+                    format!("{data}\n")
                 };
                 agent.record_command("send", &payload);
 
-                let mut bytes = data.into_bytes();
-                if newline {
-                    bytes.push(b'\n');
+                match dup_pty_fd(agent) {
+                    Ok(fd) => (fd, Arc::clone(&agent.write_lock)),
+                    Err(e) => return Response::error(e),
                 }
-                if enter {
-                    bytes.push(b'\r');
-                }
+            };
 
-                // Write to PTY master
-                let fd = agent.pty.master_fd();
-                let borrowed_fd = crate::sys::borrow_fd(fd);
-                match nix::unistd::write(borrowed_fd, &bytes) {
-                    Ok(_) => Response::Ok,
-                    Err(e) => Response::error(format!("write failed: {e}")),
-                }
-            } else {
-                Response::error(format!("agent not found: {id}"))
+            let _write_guard = write_lock.lock().await;
+
+            if let Err(e) = write_all_pty(&fd, data.as_bytes()).await {
+                return Response::error(e);
             }
+
+            if !submit_key.is_empty() {
+                let delay = submit_delay_ms.unwrap_or(crate::protocol::DEFAULT_SUBMIT_DELAY_MS);
+                if delay > 0 {
+                    crate::runtime::time::sleep(Duration::from_millis(delay)).await;
+                }
+                if let Err(e) = write_all_pty(&fd, &submit_key).await {
+                    return Response::error(e);
+                }
+            }
+
+            Response::Ok
         }
 
         Request::SendBytes { id, data } => {
-            let mut mgr = manager.lock().await;
-            if let Some(agent) = mgr.get_mut(&id) {
-                // Record the command before sending
+            let (fd, write_lock) = {
+                let mut mgr = manager.lock().await;
+                let Some(agent) = mgr.get_mut(&id) else {
+                    return Response::error(format!("agent not found: {id}"));
+                };
                 agent.record_command("send_bytes", hex::encode(&data));
 
-                let fd = agent.pty.master_fd();
-                let borrowed_fd = crate::sys::borrow_fd(fd);
-                match nix::unistd::write(borrowed_fd, &data) {
-                    Ok(_) => Response::Ok,
-                    Err(e) => Response::error(format!("write failed: {e}")),
+                match dup_pty_fd(agent) {
+                    Ok(fd) => (fd, Arc::clone(&agent.write_lock)),
+                    Err(e) => return Response::error(e),
                 }
-            } else {
-                Response::error(format!("agent not found: {id}"))
+            };
+
+            let _write_guard = write_lock.lock().await;
+            match write_all_pty(&fd, &data).await {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::error(e),
             }
         }
 

@@ -179,6 +179,7 @@ vessel::async_test! {
                 data: "echo VESSEL_TEST_OUTPUT".into(),
                 newline: true,
                 enter: false,
+                submit_delay_ms: None,
             })
             .await
             .expect("send failed");

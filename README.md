@@ -77,6 +77,8 @@ vessel signal worker --signal USR1
 
 ```bash
 vessel send worker "make test" -n
+vessel send worker "run the tests" -e     # -e/--enter submits (CR)
+vessel send worker "ls" -n --submit-delay-ms 0   # skip the pre-key pause
 vessel send-bytes worker 1b5b41           # up arrow
 vessel send-keys worker ctrl-c enter
 vessel tail worker -f
@@ -85,6 +87,14 @@ vessel snapshot worker
 vessel snapshot worker --raw
 vessel dump worker --format jsonl
 ```
+
+`--newline`/`--enter` write the submit key in a separate PTY write, 50ms after
+the text. Full-screen TUIs classify input by arrival timing: a CR/LF that lands
+in the same burst as the text is treated as pasted content and gets inserted
+into the composer instead of submitting it, so the prompt sits there looking
+delivered. The pause puts the key outside that burst. Use
+`--submit-delay-ms 0` to write it immediately (fine for shells and other
+line-oriented programs), or raise it for a TUI that still swallows the key.
 
 ### Synchronization and assertions
 

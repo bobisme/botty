@@ -903,6 +903,7 @@ async fn run_client(
             text,
             newline,
             enter,
+            submit_delay_ms,
             format,
             json,
         } => {
@@ -911,6 +912,7 @@ async fn run_client(
                 data: text.unwrap_or_default(),
                 newline,
                 enter,
+                submit_delay_ms,
             };
             let response = client.request(request).await?;
 
@@ -1933,6 +1935,7 @@ async fn run_client(
                     data: full_cmd,
                     newline: false, // Already has newline
                     enter: false,
+                    submit_delay_ms: None,
                 })
                 .await?;
 
