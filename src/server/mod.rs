@@ -1549,12 +1549,10 @@ async fn handle_events(
                 // We missed some events - log but continue
                 warn!("Events subscriber lagged, missed {n} events");
             }
-            #[cfg(feature = "runtime-asupersync")]
             Err(broadcast::error::RecvError::Cancelled) => {
                 debug!("Events recv cancelled");
                 break;
             }
-            #[cfg(feature = "runtime-asupersync")]
             Err(broadcast::error::RecvError::PolledAfterCompletion) => {
                 debug!("Events recv polled after completion");
                 break;

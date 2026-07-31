@@ -379,7 +379,7 @@ async fn run_io_bridge(
                 if n == 0 {
                     // EOF on stdin - treat as detach
                     debug!("EOF on stdin, detaching");
-                    send_detach(stream).await?;
+                    send_detach(stream)?;
                     return Ok(AttachEndReason::Detached);
                 }
 
@@ -398,7 +398,7 @@ async fn run_io_bridge(
                             if byte == config.detach_key {
                                 // Detach!
                                 debug!("Detach sequence received");
-                                send_detach(stream).await?;
+                                send_detach(stream)?;
                                 return Ok(AttachEndReason::Detached);
                             } else if byte == config.detach_prefix {
                                 // Double prefix = send one prefix
@@ -463,12 +463,10 @@ async fn send_data(stream: &mut UnixStream, data: &[u8]) -> Result<(), AttachErr
 }
 
 /// Send detach signal to server.
-async fn send_detach(stream: &mut UnixStream) -> Result<(), AttachError> {
+fn send_detach(stream: &mut UnixStream) -> Result<(), AttachError> {
     // Send an empty write or a special marker
     // For now, we'll just close our write side, which the server will detect
-    crate::runtime::net::shutdown_write(stream)
-        .await
-        .map_err(AttachError::Io)?;
+    crate::runtime::net::shutdown_write(stream).map_err(AttachError::Io)?;
     Ok(())
 }
 

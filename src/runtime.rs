@@ -1,86 +1,20 @@
 //! Runtime abstraction layer.
 //!
-//! Re-exports async primitives from the active runtime (tokio or asupersync)
-//! behind a unified interface. During migration, both runtimes can coexist
-//! via feature flags; once migration is complete, the tokio path is removed.
+//! Re-exports asupersync's async primitives behind an ambient-authority
+//! interface, hiding the Cx capability that its API threads through every
+//! call. Named `runtime` rather than `asupersync` because call sites should
+//! not care which runtime is underneath.
+//!
+//! This was a two-backend abstraction during the tokio -> asupersync
+//! migration. The tokio path is gone; what remains is the shim.
 
-// Exactly one runtime must be enabled.
-#[cfg(all(feature = "runtime-tokio", feature = "runtime-asupersync"))]
-compile_error!("features `runtime-tokio` and `runtime-asupersync` are mutually exclusive");
-
-#[cfg(not(any(feature = "runtime-tokio", feature = "runtime-asupersync")))]
-compile_error!("exactly one of `runtime-tokio` or `runtime-asupersync` must be enabled");
-
-// ── tokio backend ────────────────────────────────────────────────────────
-
-#[cfg(feature = "runtime-tokio")]
-pub mod net {
-    pub use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-    pub use tokio::net::{UnixListener, UnixStream};
-
-    /// Bind a Unix listener (sync in tokio, async in asupersync).
-    pub async fn bind_unix_listener(
-        path: impl AsRef<std::path::Path>,
-    ) -> std::io::Result<UnixListener> {
-        UnixListener::bind(path)
-    }
-
-    /// Shut down the write half of a stream.
-    pub async fn shutdown_write(stream: &mut UnixStream) -> std::io::Result<()> {
-        use tokio::io::AsyncWriteExt;
-        stream.shutdown().await
-    }
-}
-
-#[cfg(feature = "runtime-tokio")]
-pub mod io {
-    pub use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, stdin, stdout};
-}
-
-#[cfg(feature = "runtime-tokio")]
-pub mod sync {
-    pub use tokio::sync::{Mutex, broadcast};
-}
-
-#[cfg(feature = "runtime-tokio")]
-pub mod time {
-    pub use tokio::time::{Duration, Instant, interval, sleep, timeout};
-}
-
-#[cfg(feature = "runtime-tokio")]
-pub mod signal {
-    pub use tokio::signal::unix::{Signal, SignalKind, signal};
-}
-
-#[cfg(feature = "runtime-tokio")]
-pub mod task {
-    pub use tokio::spawn;
-    pub use tokio::task::{JoinHandle, spawn_blocking};
-}
-
-/// Re-export the select macro.
-#[cfg(feature = "runtime-tokio")]
-macro_rules! select {
-    ($($tt:tt)*) => { tokio::select! { $($tt)* } };
-}
-
-#[cfg(feature = "runtime-tokio")]
-pub(crate) use select;
-
-// ── asupersync backend ───────────────────────────────────────────────────
-//
-// Wraps asupersync's capability-based API (Cx-threaded) behind the same
-// ambient-authority interface that tokio exposes. Cx is obtained via
-// Cx::current() at each call site.
-
-#[cfg(feature = "runtime-asupersync")]
 pub mod net {
     pub use asupersync::net::{UnixListener, UnixStream};
     pub use asupersync::net::{
         UnixOwnedReadHalf as OwnedReadHalf, UnixOwnedWriteHalf as OwnedWriteHalf,
     };
 
-    /// Bind a Unix listener (async in asupersync, sync in tokio).
+    /// Bind a Unix listener.
     pub async fn bind_unix_listener(
         path: impl AsRef<std::path::Path>,
     ) -> std::io::Result<UnixListener> {
@@ -88,22 +22,16 @@ pub mod net {
     }
 
     /// Shut down the write half of a stream.
-    /// Bridges tokio's `AsyncWriteExt::shutdown()` (async, no args) with
-    /// asupersync's `UnixStream::shutdown(Shutdown)` (sync, takes arg).
-    // Kept `async` to mirror the tokio-backed variant's signature so call sites
-    // can `.await` it under either runtime feature.
-    #[allow(clippy::unused_async)]
-    pub async fn shutdown_write(stream: &mut UnixStream) -> std::io::Result<()> {
+    pub fn shutdown_write(stream: &mut UnixStream) -> std::io::Result<()> {
         stream.shutdown(std::net::Shutdown::Write)
     }
 }
 
-#[cfg(feature = "runtime-asupersync")]
 pub mod io {
     pub use asupersync::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
-    /// Extension trait that adds `read_line` as a method (tokio-compatible).
-    /// In asupersync, `read_line` is a standalone function, not a trait method.
+    /// Adds `read_line` as a method, since asupersync exposes it as a
+    /// standalone function rather than a trait method.
     pub trait AsyncBufReadExt: asupersync::io::AsyncBufRead + Unpin {
         fn read_line<'a>(&'a mut self, buf: &'a mut String) -> asupersync::io::ReadLine<'a, Self> {
             asupersync::io::read_line(self, buf)
@@ -183,7 +111,6 @@ pub mod io {
     }
 }
 
-#[cfg(feature = "runtime-asupersync")]
 pub mod sync {
     use std::ops::{Deref, DerefMut};
     use std::sync::Arc;
@@ -239,7 +166,7 @@ pub mod sync {
     }
 
     pub mod broadcast {
-        /// Re-export error types at the same path as tokio's.
+        /// Error types, grouped in an `error` submodule.
         pub mod error {
             pub use asupersync::channel::broadcast::{RecvError, SendError};
         }
@@ -290,7 +217,6 @@ pub mod sync {
     }
 }
 
-#[cfg(feature = "runtime-asupersync")]
 pub mod time {
     pub use std::time::Duration;
     pub use std::time::Instant;
@@ -338,12 +264,10 @@ pub mod time {
     }
 }
 
-#[cfg(feature = "runtime-asupersync")]
 pub mod signal {
     pub use asupersync::signal::{Signal, SignalKind, signal};
 }
 
-#[cfg(feature = "runtime-asupersync")]
 pub mod task {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, OnceLock};
@@ -433,7 +357,7 @@ pub mod task {
         done: AtomicBool,
     }
 
-    /// Join handle compatible with tokio's `JoinHandle<T>`.
+    /// Join handle for a spawned or blocking task.
     pub struct JoinHandle<T>(JoinHandleInner<T>);
 
     enum JoinHandleInner<T> {
@@ -510,7 +434,6 @@ pub mod task {
 ///       pat = `future_expr` => { body }
 ///       pat = `future_expr`, if guard => { body }
 ///   }
-#[cfg(feature = "runtime-asupersync")]
 macro_rules! select {
     // ── 2 branches ──────────────────────────────────────────────────
     (
@@ -605,7 +528,6 @@ macro_rules! select {
 
 /// Helper: conditionally substitute `pending()` when a guard is false.
 /// `Box::pins` inner futures so `SelectEither` gets Unpin inputs.
-#[cfg(feature = "runtime-asupersync")]
 macro_rules! select_arm {
     // With guard — wrap in SelectEither with Box::pin'd inner futures
     ($fut:expr, $guard:expr) => {
@@ -621,15 +543,12 @@ macro_rules! select_arm {
     };
 }
 
-#[cfg(feature = "runtime-asupersync")]
 pub(crate) use select;
-#[cfg(feature = "runtime-asupersync")]
 pub(crate) use select_arm;
 
 /// Helper module for guard-based select arms.
 /// When a guard is present, both branches must have the same type,
 /// so we wrap in an enum that resolves to the inner future's output.
-#[cfg(feature = "runtime-asupersync")]
 pub(crate) mod select_either {
     use std::future::Future;
     use std::pin::Pin;
@@ -664,7 +583,10 @@ pub(crate) mod select_either {
     }
 }
 
-/// Macro for async test functions that works with both runtime backends.
+/// Declare an async test.
+///
+/// Wraps the body in a one-shot runtime, since asupersync has no attribute
+/// macro equivalent to `#[tokio::test]`.
 ///
 /// Usage:
 /// ```ignore
@@ -677,11 +599,6 @@ pub(crate) mod select_either {
 #[macro_export]
 macro_rules! async_test {
     (async fn $name:ident() $body:block) => {
-        #[cfg(feature = "runtime-tokio")]
-        #[tokio::test]
-        async fn $name() $body
-
-        #[cfg(feature = "runtime-asupersync")]
         #[test]
         fn $name() {
             $crate::runtime::task::block_on(async $body)

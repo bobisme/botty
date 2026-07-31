@@ -28,11 +28,10 @@ serde_json = "1.0.149"
 similar = { version = "2.6.0", features = ["text"] }
 strip-ansi-escapes = "0.2.1"
 thiserror = "2.0.18"
-tokio = { version = "1.49.0", features = ["full"], optional = true }
 asupersync = { version = "0.3.10", default-features = false, features = [
   "test-internals",
   "proc-macros",
-], optional = true }
+] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
 vt100 = "0.16.2"
@@ -53,9 +52,7 @@ opentelemetry-appender-tracing = { version = "0.31", optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 
 [features]
-default = ["otel", "runtime-asupersync"]
-runtime-tokio = ["dep:tokio"]
-runtime-asupersync = ["dep:asupersync"]
+default = ["otel"]
 otel = [
   "dep:opentelemetry",
   "dep:opentelemetry_sdk",
