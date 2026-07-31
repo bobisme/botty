@@ -523,7 +523,7 @@ impl TmuxView {
     │                                     │
     │      Waiting for agents...          │
     │                                     │
-    │   Run: vessel spawn -- <command>     │
+    │   Run: vessel spawn -- <command>    │
     │                                     │
     ╰─────────────────────────────────────╯
 '; sleep 3600"; // 1-hour timeout to avoid running forever if abandoned
