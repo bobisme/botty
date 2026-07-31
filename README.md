@@ -236,6 +236,16 @@ vessel list --format json | jq '.agents[] | {id, state, labels}'
 - Default socket path: `/run/user/$UID/vessel.sock` (fallback `/tmp/vessel-$UID.sock`).
 - Override with `VESSEL_SOCKET` or `--socket`.
 
+### Logging
+
+Logs go to stderr, at `vessel=warn` by default and `vessel=debug` with
+`--verbose`. `RUST_LOG` overrides the filter in every mode.
+
+| Variable | Effect |
+|---|---|
+| `VESSEL_LOG=<path>` | Also append logs to a file, at `vessel=info` or better so server lifecycle events are captured without `--verbose`. |
+| `VESSEL_LOG_FORMAT=json` | Emit JSON spans and events to stderr instead of the human formatter, for callers that parse vessel's logs. |
+
 ## Troubleshooting
 
 ```bash

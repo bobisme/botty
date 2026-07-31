@@ -848,7 +848,7 @@ async fn handle_request(
             }
 
             // Parse environment variables
-            let mut env_vars: Vec<(String, String)> = env
+            let env_vars: Vec<(String, String)> = env
                 .iter()
                 .filter_map(|s| {
                     let mut parts = s.splitn(2, '=');
@@ -860,14 +860,6 @@ async fn handle_request(
                     }
                 })
                 .collect();
-
-            // Auto-inject TRACEPARENT for distributed tracing if not already set.
-            // This propagates the current trace context to spawned agent processes.
-            if !env_vars.iter().any(|(k, _)| k == "TRACEPARENT")
-                && let Some(tp) = crate::telemetry::current_traceparent()
-            {
-                env_vars.push(("TRACEPARENT".to_string(), tp));
-            }
 
             // Build resource limits if any are specified
             let limits = if timeout.is_some() || max_output.is_some() {

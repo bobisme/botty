@@ -1,68 +1,36 @@
-//! Telemetry initialization.
+//! Logging initialization.
 //!
-//! Controlled by `OTEL_EXPORTER_OTLP_ENDPOINT` (the standard OTLP env var):
-//! - unset → no-op (tracing disabled, zero overhead)
-//! - `"stderr"` → JSON spans/events to stderr (non-standard extension)
-//! - `"http://..."` → OTLP HTTP export (traces + logs) to the given endpoint
+//! Human-readable logs to stderr by default. Two environment variables adjust
+//! that:
 //!
-//! ## Distributed tracing
+//! - `VESSEL_LOG=<path>` also appends logs to a file, at `vessel=info` or
+//!   better so server lifecycle events are captured without `--verbose`.
+//! - `VESSEL_LOG_FORMAT=json` emits JSON spans and events to stderr instead of
+//!   the human formatter, for callers that parse vessel's logs.
 //!
-//! If `TRACEPARENT` is set (W3C Trace Context format), spans are created as
-//! children of the remote parent. Use [`current_traceparent`] to extract the
-//! current span context for propagation to child processes.
+//! `RUST_LOG` overrides the filter in every mode.
 
 use tracing_subscriber::EnvFilter;
 
-/// Opaque guard — dropping it flushes and shuts down the OTLP pipeline.
-/// Hold this in `main()` until exit.
+/// Opaque guard returned by [`init`].
+///
+/// Kept as a type (rather than returning `()`) so `main` holding it to exit
+/// stays correct if a future backend needs flushing on shutdown.
 pub struct TelemetryGuard {
-    #[cfg(feature = "otel")]
-    trace_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
-    #[cfg(feature = "otel")]
-    log_provider: Option<opentelemetry_sdk::logs::SdkLoggerProvider>,
+    _priv: (),
 }
 
-impl Drop for TelemetryGuard {
-    fn drop(&mut self) {
-        #[cfg(feature = "otel")]
-        {
-            if let Some(provider) = self.trace_provider.take()
-                && let Err(e) = provider.shutdown()
-            {
-                eprintln!("otel trace shutdown error: {e}");
-            }
-            if let Some(provider) = self.log_provider.take()
-                && let Err(e) = provider.shutdown()
-            {
-                eprintln!("otel log shutdown error: {e}");
-            }
-        }
-    }
-}
-
-/// Initialize telemetry based on `OTEL_EXPORTER_OTLP_ENDPOINT`.
+/// Initialize logging.
 ///
-/// When `verbose` is true, the default filter level is `vessel=debug`;
-/// otherwise `vessel=warn`. The `RUST_LOG` env var overrides both.
+/// When `verbose` is true the default filter is `vessel=debug`, otherwise
+/// `vessel=warn`. `RUST_LOG` overrides both.
 ///
-/// Returns a guard that must be held until the program exits.
-/// Dropping the guard flushes any pending spans and logs.
+/// Returns a guard that should be held until the program exits.
 #[must_use]
 pub fn init(verbose: bool) -> TelemetryGuard {
-    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
-
-    match endpoint.as_deref() {
-        None | Some("") => init_fmt(verbose),
-        Some("stderr") => init_stderr(),
-        #[cfg(feature = "otel")]
-        Some(_) => init_otlp(verbose),
-        #[cfg(not(feature = "otel"))]
-        Some(_) => {
-            eprintln!(
-                "warning: OTEL_EXPORTER_OTLP_ENDPOINT set but vessel built without 'otel' feature"
-            );
-            init_fmt(verbose)
-        }
+    match std::env::var("VESSEL_LOG_FORMAT").as_deref() {
+        Ok("json") => init_json(),
+        _ => init_fmt(verbose),
     }
 }
 
@@ -121,16 +89,11 @@ fn init_fmt(verbose: bool) -> TelemetryGuard {
             .init();
     }
 
-    TelemetryGuard {
-        #[cfg(feature = "otel")]
-        trace_provider: None,
-        #[cfg(feature = "otel")]
-        log_provider: None,
-    }
+    TelemetryGuard { _priv: () }
 }
 
-/// JSON spans/events to stderr via tracing-subscriber's JSON formatter.
-fn init_stderr() -> TelemetryGuard {
+/// JSON spans and events to stderr, via tracing-subscriber's JSON formatter.
+fn init_json() -> TelemetryGuard {
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
@@ -146,137 +109,5 @@ fn init_stderr() -> TelemetryGuard {
         )
         .init();
 
-    TelemetryGuard {
-        #[cfg(feature = "otel")]
-        trace_provider: None,
-        #[cfg(feature = "otel")]
-        log_provider: None,
-    }
-}
-
-/// OTLP HTTP export (traces + logs).
-#[cfg(feature = "otel")]
-fn init_otlp(verbose: bool) -> TelemetryGuard {
-    use opentelemetry::trace::TracerProvider as _;
-    use tracing_subscriber::layer::SubscriberExt as _;
-    use tracing_subscriber::util::SubscriberInitExt as _;
-
-    // --- Traces ---
-    let span_exporter = match opentelemetry_otlp::SpanExporter::builder()
-        .with_http()
-        .build()
-    {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("warning: failed to init OTLP span exporter: {e}");
-            return init_fmt(verbose);
-        }
-    };
-
-    let resource = otel_resource();
-
-    let trace_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-        .with_simple_exporter(span_exporter)
-        .with_resource(resource.clone())
-        .build();
-
-    let tracer = trace_provider.tracer(env!("CARGO_PKG_NAME"));
-    let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-
-    // --- Logs ---
-    let log_exporter = match opentelemetry_otlp::LogExporter::builder()
-        .with_http()
-        .build()
-    {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("warning: failed to init OTLP log exporter: {e}");
-            return init_fmt(verbose);
-        }
-    };
-
-    let log_provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
-        .with_simple_exporter(log_exporter)
-        .with_resource(resource)
-        .build();
-
-    let log_layer =
-        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&log_provider);
-
-    // --- Parent context (distributed tracing) ---
-    install_parent_context();
-
-    // --- Subscriber ---
-    let default = if verbose {
-        "vessel=debug"
-    } else {
-        "vessel=warn"
-    };
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(trace_layer)
-        .with(log_layer)
-        .init();
-
-    TelemetryGuard {
-        trace_provider: Some(trace_provider),
-        log_provider: Some(log_provider),
-    }
-}
-
-/// Extract the current span's trace context as a W3C `TRACEPARENT` string.
-///
-/// Returns `None` if OTEL is not enabled or no valid span context exists.
-/// Use this to propagate trace context to child processes via environment
-/// variables.
-#[cfg(feature = "otel")]
-#[must_use]
-pub fn current_traceparent() -> Option<String> {
-    use opentelemetry::propagation::TextMapPropagator as _;
-    use opentelemetry_sdk::propagation::TraceContextPropagator;
-    use std::collections::HashMap;
-
-    let propagator = TraceContextPropagator::new();
-    let mut carrier: HashMap<String, String> = HashMap::new();
-    propagator.inject(&mut carrier);
-    carrier.remove("traceparent")
-}
-
-/// Stub when otel feature is disabled.
-#[cfg(not(feature = "otel"))]
-pub fn current_traceparent() -> Option<String> {
-    None
-}
-
-/// If `TRACEPARENT` is set, parse it and install as the current `OTel` context
-/// so that subsequent spans become children of the remote parent.
-#[cfg(feature = "otel")]
-fn install_parent_context() {
-    use opentelemetry::propagation::TextMapPropagator as _;
-    use opentelemetry_sdk::propagation::TraceContextPropagator;
-    use std::collections::HashMap;
-
-    if let Ok(traceparent) = std::env::var("TRACEPARENT") {
-        let mut carrier: HashMap<String, String> = HashMap::new();
-        carrier.insert("traceparent".to_string(), traceparent);
-        let propagator = TraceContextPropagator::new();
-        let cx = propagator.extract(&carrier);
-        // Attach as the current context — tracing-opentelemetry's layer will
-        // pick this up as the parent for root-level spans.
-        let guard = cx.attach();
-        // The guard is intentionally leaked: we want this context to remain
-        // active for the lifetime of the process.
-        std::mem::forget(guard);
-    }
-}
-
-#[cfg(feature = "otel")]
-fn otel_resource() -> opentelemetry_sdk::Resource {
-    use opentelemetry::KeyValue;
-    opentelemetry_sdk::Resource::builder()
-        .with_attribute(KeyValue::new("service.name", env!("CARGO_PKG_NAME")))
-        .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
-        .build()
+    TelemetryGuard { _priv: () }
 }
