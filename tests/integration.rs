@@ -175,7 +175,10 @@ vessel::async_test! {
         // Send a command
         let response = client
             .request(Request::Send {
-                id: agent_id.clone(),
+                id: Some(agent_id.clone()),
+                labels: Vec::new(),
+                all: false,
+                proc_filter: None,
                 data: "echo VESSEL_TEST_OUTPUT".into(),
                 newline: true,
                 enter: false,

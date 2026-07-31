@@ -458,6 +458,89 @@ async fn run_doctor(socket_path: std::path::PathBuf) -> Result<(), Box<dyn std::
     }
 }
 
+/// Print the per-agent outcomes of a fan-out send.
+///
+/// Text and pretty get one ID-first record per agent. This breaks the "stay
+/// silent on success" rule the single-agent send follows, deliberately: a
+/// fan-out can partially fail, and saying nothing would report that as total
+/// success.
+fn report_send_results(
+    results: &[vessel::protocol::SendOutcome],
+    fmt: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match fmt {
+        OutputFormat::Json => {
+            let envelope = json_envelope(
+                "result",
+                json!({
+                    "delivered": results.iter().filter(|r| r.is_ok()).count(),
+                    "failed": results.iter().filter(|r| !r.is_ok()).count(),
+                    "results": results,
+                }),
+                results
+                    .iter()
+                    .filter(|r| r.is_ok())
+                    .map(|r| format!("vessel snapshot {}", r.id))
+                    .collect(),
+            );
+            println!("{}", serde_json::to_string(&envelope)?);
+        }
+        OutputFormat::Text | OutputFormat::Pretty => {
+            for outcome in results {
+                match &outcome.error {
+                    None => println!("{}  ok", outcome.id),
+                    Some(e) => println!("{}  error: {e}", outcome.id),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One-line summary naming how many agents missed the input.
+fn send_failure_summary(results: &[vessel::protocol::SendOutcome]) -> String {
+    let failed = results.iter().filter(|r| !r.is_ok()).count();
+    format!(
+        "{failed} of {} agents did not receive the input",
+        results.len()
+    )
+}
+
+/// Handle the response to a `Send`/`SendBytes`, in either shape.
+///
+/// A request naming one agent answers `Ok`/`Error` as it always has; a
+/// selector-based one answers with per-agent results, which are printed and
+/// then turned into a non-zero exit if any agent missed the input.
+fn handle_send_response(
+    response: Response,
+    fmt: OutputFormat,
+    id: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match response {
+        Response::Ok => {
+            match fmt {
+                OutputFormat::Json => {
+                    let hint = id.map_or_else(Vec::new, |id| vec![format!("vessel snapshot {id}")]);
+                    let envelope = json_envelope("result", json!({"status": "ok"}), hint);
+                    println!("{}", serde_json::to_string(&envelope)?);
+                }
+                // Keep text/pretty silent for fire-and-forget commands
+                OutputFormat::Text | OutputFormat::Pretty => {}
+            }
+            Ok(())
+        }
+        Response::SendResults { results } => {
+            report_send_results(&results, fmt)?;
+            if results.iter().any(|r| !r.is_ok()) {
+                return Err(send_failure_summary(&results).into());
+            }
+            Ok(())
+        }
+        Response::Error { message } => Err(message.into()),
+        _ => Err("unexpected response".into()),
+    }
+}
+
 #[allow(clippy::too_many_lines)] // Command dispatch function, splitting would reduce clarity
 async fn run_client(
     socket_path: std::path::PathBuf,
@@ -901,6 +984,9 @@ async fn run_client(
         Command::Send {
             id,
             text,
+            label,
+            all,
+            proc,
             paste,
             newline,
             enter,
@@ -908,6 +994,12 @@ async fn run_client(
             format,
             json,
         } => {
+            let selector_used = all || !label.is_empty() || proc.is_some();
+            let (id, text) = vessel::split_send_positionals(id, text, selector_used)?;
+            if !selector_used && id.is_none() {
+                return Err("must specify agent ID, --label, --proc, or --all".into());
+            }
+
             // "-" reads the payload from stdin: prompts for coding agents are
             // routinely too long to be comfortable as argv.
             let data = match text.as_deref() {
@@ -927,6 +1019,9 @@ async fn run_client(
 
             let request = Request::Send {
                 id: id.clone(),
+                labels: label,
+                all,
+                proc_filter: proc,
                 data,
                 newline,
                 enter,
@@ -934,123 +1029,105 @@ async fn run_client(
                 paste,
             };
             let response = client.request(request).await?;
-
-            match response {
-                Response::Ok => {
-                    let fmt = resolve_format(if json {
-                        Some("json")
-                    } else {
-                        format.as_deref()
-                    });
-                    match fmt {
-                        OutputFormat::Json => {
-                            // JSON envelope for programmatic use
-                            let envelope = json_envelope(
-                                "result",
-                                json!({"status": "ok"}),
-                                vec![format!("vessel snapshot {id}")],
-                            );
-                            println!("{}", serde_json::to_string(&envelope)?);
-                        }
-                        // Keep text/pretty silent for fire-and-forget commands
-                        OutputFormat::Text | OutputFormat::Pretty => {}
-                    }
-                }
-                Response::Error { message } => {
-                    return Err(message.into());
-                }
-                _ => {
-                    return Err("unexpected response".into());
-                }
-            }
-        }
-
-        Command::SendBytes {
-            id,
-            hex,
-            format,
-            json,
-        } => {
-            let data = hex::decode(&hex).map_err(|e| format!("invalid hex: {e}"))?;
-            let request = Request::SendBytes {
-                id: id.clone(),
-                data,
-            };
-            let response = client.request(request).await?;
-
-            match response {
-                Response::Ok => {
-                    let fmt = resolve_format(if json {
-                        Some("json")
-                    } else {
-                        format.as_deref()
-                    });
-                    match fmt {
-                        OutputFormat::Json => {
-                            // JSON envelope for programmatic use
-                            let envelope = json_envelope(
-                                "result",
-                                json!({"status": "ok"}),
-                                vec![format!("vessel snapshot {id}")],
-                            );
-                            println!("{}", serde_json::to_string(&envelope)?);
-                        }
-                        // Keep text/pretty silent for fire-and-forget commands
-                        OutputFormat::Text | OutputFormat::Pretty => {}
-                    }
-                }
-                Response::Error { message } => {
-                    return Err(message.into());
-                }
-                _ => {
-                    return Err("unexpected response".into());
-                }
-            }
-        }
-
-        Command::SendKeys {
-            id,
-            keys,
-            format,
-            json,
-        } => {
-            use vessel::parse_key_sequence;
-            for key in keys {
-                let data = parse_key_sequence(&key).ok_or_else(|| format!("unknown key: {key}"))?;
-                let request = Request::SendBytes {
-                    id: id.clone(),
-                    data,
-                };
-                let response = client.request(request).await?;
-
-                match response {
-                    Response::Ok => {}
-                    Response::Error { message } => {
-                        return Err(message.into());
-                    }
-                    _ => {
-                        return Err("unexpected response".into());
-                    }
-                }
-            }
-            // Output after all keys are sent
             let fmt = resolve_format(if json {
                 Some("json")
             } else {
                 format.as_deref()
             });
-            match fmt {
-                OutputFormat::Json => {
-                    // JSON envelope for programmatic use
-                    let envelope = json_envelope(
-                        "result",
-                        json!({"status": "ok"}),
-                        vec![format!("vessel snapshot {id}")],
-                    );
-                    println!("{}", serde_json::to_string(&envelope)?);
+            handle_send_response(response, fmt, id.as_deref())?;
+        }
+
+        Command::SendBytes {
+            id,
+            hex,
+            label,
+            all,
+            proc,
+            format,
+            json,
+        } => {
+            let selector_used = all || !label.is_empty() || proc.is_some();
+            let (id, hex) = vessel::split_send_positionals(id, hex, selector_used)?;
+            if !selector_used && id.is_none() {
+                return Err("must specify agent ID, --label, --proc, or --all".into());
+            }
+            let hex = hex.ok_or("missing hex payload")?;
+
+            let data = hex::decode(&hex).map_err(|e| format!("invalid hex: {e}"))?;
+            let request = Request::SendBytes {
+                id: id.clone(),
+                labels: label,
+                all,
+                proc_filter: proc,
+                data,
+            };
+            let response = client.request(request).await?;
+            let fmt = resolve_format(if json {
+                Some("json")
+            } else {
+                format.as_deref()
+            });
+            handle_send_response(response, fmt, id.as_deref())?;
+        }
+
+        Command::SendKeys {
+            id,
+            keys,
+            label,
+            all,
+            proc,
+            format,
+            json,
+        } => {
+            use vessel::parse_key_sequence;
+
+            let selector_used = all || !label.is_empty() || proc.is_some();
+            let (id, keys) = vessel::split_send_keys_positionals(id, keys, selector_used);
+            if !selector_used && id.is_none() {
+                return Err("must specify agent ID, --label, --proc, or --all".into());
+            }
+            if keys.is_empty() {
+                return Err("no keys given".into());
+            }
+
+            let fmt = resolve_format(if json {
+                Some("json")
+            } else {
+                format.as_deref()
+            });
+
+            // One request per key, so the keys arrive in order on every agent.
+            // Only the last one reports, matching the previous behaviour of a
+            // single summary line for the whole sequence.
+            let last = keys.len() - 1;
+            for (i, key) in keys.iter().enumerate() {
+                let data = parse_key_sequence(key).ok_or_else(|| format!("unknown key: {key}"))?;
+                let request = Request::SendBytes {
+                    id: id.clone(),
+                    labels: label.clone(),
+                    all,
+                    proc_filter: proc.clone(),
+                    data,
+                };
+                let response = client.request(request).await?;
+
+                if i == last {
+                    handle_send_response(response, fmt, id.as_deref())?;
+                } else {
+                    // Fail fast so a bad key does not leave a half-sent
+                    // sequence sitting in the composer.
+                    match response {
+                        Response::Ok => {}
+                        Response::SendResults { results } => {
+                            if results.iter().any(|r| !r.is_ok()) {
+                                report_send_results(&results, fmt)?;
+                                return Err(send_failure_summary(&results).into());
+                            }
+                        }
+                        Response::Error { message } => return Err(message.into()),
+                        _ => return Err("unexpected response".into()),
+                    }
                 }
-                // Keep text/pretty silent for fire-and-forget commands
-                OutputFormat::Text | OutputFormat::Pretty => {}
             }
         }
 
@@ -1950,7 +2027,10 @@ async fn run_client(
 
             let send_response = client
                 .request(Request::Send {
-                    id: agent_id.clone(),
+                    id: Some(agent_id.clone()),
+                    labels: Vec::new(),
+                    all: false,
+                    proc_filter: None,
                     data: full_cmd,
                     newline: false, // Already has newline
                     enter: false,

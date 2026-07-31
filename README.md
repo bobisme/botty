@@ -83,6 +83,8 @@ vessel send agent "$PROMPT" -p -e         # -p/--paste: multi-line prompt, then 
 vessel send agent - -p -e < prompt.md     # "-" reads the payload from stdin
 vessel send-bytes worker 1b5b41           # up arrow
 vessel send-keys worker ctrl-c enter
+vessel send --label batch "status?" -e    # fan out to every agent with a label
+vessel send-keys --label batch ctrl-c     # selectors work on the whole send family
 vessel tail worker -f
 vessel tail worker --raw
 vessel snapshot worker
@@ -120,6 +122,38 @@ PROMPT
 
 Any `ESC[201~` inside the text is dropped rather than forwarded — it would
 otherwise close the bracket early and deliver the remainder as live keystrokes.
+
+#### Sending to a group
+
+`send`, `send-bytes`, and `send-keys` all take the same selectors `kill` and
+`signal` use: `--label` (repeatable, agents must carry all of them), `--proc`
+(command substring), and `--all`. They match running agents only.
+
+**With a selector, omit the agent ID** — every positional is payload:
+
+```bash
+vessel send --label batch "run the tests" --paste --enter
+vessel send-keys --label batch ctrl-c
+vessel send --proc codex "status?" --enter
+```
+
+Passing both an ID and a selector is rejected rather than guessed at. Note that
+`--proc` has no `-p` short form on these three commands, because `-p` is
+`--paste` on `send`; `kill` and `signal` keep `-p` for `--proc`.
+
+A fan-out reports one line per agent and exits non-zero if any of them missed
+the input — a group send can partially fail, and staying silent would report
+that as success:
+
+```
+$ vessel send --label batch "hi" --enter
+tidy-otter    ok
+brave-heron   error: write failed: Input/output error
+```
+
+Deliveries run concurrently, so the per-agent submit delays overlap instead of
+stacking. A request naming a single agent ID is unchanged: silent on success,
+non-zero on failure.
 
 ### Synchronization and assertions
 

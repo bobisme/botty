@@ -226,6 +226,144 @@ fn test_send_reads_text_from_stdin() {
     env.vessel().args(["kill", &agent_id]).assert().success();
 }
 
+// bn-1dxu: --label fans out to every matching agent, and send-keys takes the
+// same selectors. With a selector the agent ID is omitted, so every positional
+// is payload.
+#[test]
+fn test_send_label_fans_out_to_matching_agents() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let output = env
+            .vessel()
+            .args(["spawn", "--label", "fanout", "--", "bash"])
+            .output()
+            .expect("failed to run spawn");
+        assert!(output.status.success());
+        ids.push(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+
+    // An agent outside the label, to prove the selector actually filters.
+    let output = env
+        .vessel()
+        .args(["spawn", "--label", "excluded", "--", "bash"])
+        .output()
+        .expect("failed to run spawn");
+    assert!(output.status.success());
+    let outsider = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Note: no agent ID positional, because --label was given.
+    env.vessel()
+        .args([
+            "send",
+            "echo CLI_FANOUT_MARKER",
+            "--label",
+            "fanout",
+            "--newline",
+            "--submit-delay-ms",
+            "0",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("  ok"));
+
+    std::thread::sleep(Duration::from_millis(600));
+
+    for id in &ids {
+        env.vessel()
+            .args(["snapshot", id])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("CLI_FANOUT_MARKER"));
+    }
+
+    env.vessel()
+        .args(["snapshot", &outsider])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CLI_FANOUT_MARKER").not());
+
+    env.vessel().args(["kill", "--all"]).assert().success();
+}
+
+// bn-1dxu: a selector that matches nothing must fail loudly.
+#[test]
+fn test_send_label_no_match_exits_nonzero() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    env.vessel()
+        .args(["send", "hello", "--label", "nobody-has-this", "--newline"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no agents match"));
+}
+
+// bn-1dxu: an explicit ID alongside a selector is ambiguous and is rejected
+// rather than guessed at.
+#[test]
+fn test_send_rejects_id_together_with_selector() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    env.vessel()
+        .args(["send", "some-agent", "hello", "--label", "batch"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not both"));
+}
+
+// bn-1dxu: send-keys with a selector -- the variadic case, where the key that
+// clap parked in the ID slot has to move back to the front of the key list.
+#[test]
+fn test_send_keys_label_fans_out() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let output = env
+            .vessel()
+            .args(["spawn", "--label", "keyfan", "--", "bash"])
+            .output()
+            .expect("failed to run spawn");
+        assert!(output.status.success());
+        ids.push(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Type the text, then submit it -- two keys, no agent ID positional.
+    env.vessel()
+        .args(["send", "echo KEYFAN_MARKER", "--label", "keyfan"])
+        .assert()
+        .success();
+
+    std::thread::sleep(Duration::from_millis(200));
+
+    env.vessel()
+        .args(["send-keys", "enter", "--label", "keyfan"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("  ok"));
+
+    std::thread::sleep(Duration::from_millis(600));
+
+    for id in &ids {
+        env.vessel()
+            .args(["snapshot", id])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("KEYFAN_MARKER"));
+    }
+
+    env.vessel().args(["kill", "--all"]).assert().success();
+}
+
 #[test]
 fn test_tail() {
     let mut env = TestEnv::new();

@@ -46,6 +46,50 @@ pub fn parse_key_notation(s: &str) -> Option<u8> {
     None
 }
 
+/// Split the `send` / `send-bytes` positionals into (agent ID, payload).
+///
+/// The ID is the first positional, so with a selector -- where the ID is
+/// omitted -- clap parks the payload there instead. Shift it back.
+///
+/// Passing both an ID and a selector is rejected rather than guessed at: the
+/// two are alternative ways to name the same thing, and `kill` already treats
+/// them as exclusive.
+///
+/// # Errors
+///
+/// Returns an error if a selector is combined with an explicit agent ID.
+pub fn split_send_positionals(
+    id: Option<String>,
+    payload: Option<String>,
+    selector_used: bool,
+) -> Result<(Option<String>, Option<String>), String> {
+    if !selector_used {
+        return Ok((id, payload));
+    }
+    if id.is_some() && payload.is_some() {
+        return Err("specify either an agent ID or --label/--proc/--all, not both".to_string());
+    }
+    Ok((None, payload.or(id)))
+}
+
+/// Split the `send-keys` positionals into (agent ID, key names).
+///
+/// Same shift as [`split_send_positionals`], but the payload is variadic: with
+/// a selector every positional is a key name, so the one clap took for the ID
+/// belongs at the front of the list.
+#[must_use]
+pub fn split_send_keys_positionals(
+    id: Option<String>,
+    mut keys: Vec<String>,
+    selector_used: bool,
+) -> (Option<String>, Vec<String>) {
+    if selector_used && let Some(first) = id {
+        keys.insert(0, first);
+        return (None, keys);
+    }
+    (id, keys)
+}
+
 /// Parse a named key sequence into bytes.
 ///
 /// Supported keys:
@@ -289,11 +333,25 @@ pub enum Command {
     /// absorbing it into the composer as pasted content. Tune the pause with
     /// --submit-delay-ms.
     Send {
-        /// Agent ID.
-        id: String,
+        /// Agent ID. Omit it when using --label, --proc, or --all.
+        id: Option<String>,
 
         /// Text to send (optional when using --enter). Use "-" to read stdin.
         text: Option<String>,
+
+        /// Send to all running agents with these labels (can be repeated).
+        #[arg(long, short)]
+        label: Vec<String>,
+
+        /// Send to all running agents.
+        #[arg(long, short)]
+        all: bool,
+
+        /// Send to running agents whose command contains this substring.
+        ///
+        /// Long-only here: -p is --paste on this command.
+        #[arg(long)]
+        proc: Option<String>,
 
         /// Wrap the text in bracketed-paste markers (ESC[200~ .. ESC[201~).
         ///
@@ -328,13 +386,27 @@ pub enum Command {
         json: bool,
     },
 
-    /// Send raw bytes to an agent.
+    /// Send raw bytes to an agent, or to every agent a selector matches.
     SendBytes {
-        /// Agent ID.
-        id: String,
+        /// Agent ID. Omit it when using --label, --proc, or --all.
+        id: Option<String>,
 
         /// Hex-encoded bytes (e.g., "1b5b41" for up arrow).
-        hex: String,
+        hex: Option<String>,
+
+        /// Send to all running agents with these labels (can be repeated).
+        #[arg(long, short)]
+        label: Vec<String>,
+
+        /// Send to all running agents.
+        #[arg(long, short)]
+        all: bool,
+
+        /// Send to running agents whose command contains this substring.
+        ///
+        /// Long-only, to match `send`, where -p is --paste.
+        #[arg(long)]
+        proc: Option<String>,
 
         /// Output format: text, json, or pretty.
         #[arg(long)]
@@ -345,13 +417,31 @@ pub enum Command {
         json: bool,
     },
 
-    /// Send named key sequences to an agent.
+    /// Send named key sequences to an agent, or to every agent a selector
+    /// matches.
     ///
     /// Supports arrow keys (up/down/left/right), special keys (enter/tab/escape),
     /// control sequences (ctrl-c/ctrl-d), and more. See --help for full list.
+    ///
+    /// With a selector the ID is omitted, so every positional is a key name:
+    /// `vessel send-keys --label worker ctrl-c`.
     SendKeys {
-        /// Agent ID.
-        id: String,
+        /// Agent ID. Omit it when using --label, --proc, or --all.
+        id: Option<String>,
+
+        /// Send to all running agents with these labels (can be repeated).
+        #[arg(long, short)]
+        label: Vec<String>,
+
+        /// Send to all running agents.
+        #[arg(long, short)]
+        all: bool,
+
+        /// Send to running agents whose command contains this substring.
+        ///
+        /// Long-only, to match `send`, where -p is --paste.
+        #[arg(long)]
+        proc: Option<String>,
 
         /// Key names separated by spaces (e.g., "up", "down enter", "ctrl-c").
         ///
@@ -807,5 +897,60 @@ mod tests {
         assert_eq!(parse_key_sequence("invalid-key"), None);
         assert_eq!(parse_key_sequence("arrow-up"), None);
         assert_eq!(parse_key_sequence(""), None);
+    }
+
+    // bn-1dxu: with a selector the ID positional is omitted, so clap parks the
+    // payload in the ID slot and it has to shift back.
+
+    #[test]
+    fn positionals_unchanged_without_a_selector() {
+        let got = split_send_positionals(Some("agent".into()), Some("hello".into()), false);
+        assert_eq!(got, Ok((Some("agent".into()), Some("hello".into()))));
+    }
+
+    #[test]
+    fn id_required_form_allows_a_missing_payload() {
+        // `send agent --enter` sends no text, just the submit key.
+        let got = split_send_positionals(Some("agent".into()), None, false);
+        assert_eq!(got, Ok((Some("agent".into()), None)));
+    }
+
+    #[test]
+    fn selector_shifts_the_payload_out_of_the_id_slot() {
+        // `send --label worker "hello"` -> clap sees id="hello", payload=None.
+        let got = split_send_positionals(Some("hello".into()), None, true);
+        assert_eq!(got, Ok((None, Some("hello".into()))));
+    }
+
+    #[test]
+    fn selector_with_no_payload_stays_empty() {
+        let got = split_send_positionals(None, None, true);
+        assert_eq!(got, Ok((None, None)));
+    }
+
+    #[test]
+    fn selector_plus_explicit_id_is_rejected() {
+        // Both slots filled means an ID was passed alongside a selector; the
+        // two are alternative ways to name the same thing.
+        let err = split_send_positionals(Some("agent".into()), Some("hello".into()), true)
+            .expect_err("id + selector must be rejected");
+        assert!(err.contains("not both"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn send_keys_selector_reclaims_the_first_key() {
+        // `send-keys --label worker ctrl-c enter` -> clap sees id="ctrl-c".
+        let (id, keys) =
+            split_send_keys_positionals(Some("ctrl-c".into()), vec!["enter".into()], true);
+        assert_eq!(id, None);
+        assert_eq!(keys, vec!["ctrl-c".to_string(), "enter".to_string()]);
+    }
+
+    #[test]
+    fn send_keys_without_a_selector_keeps_the_id() {
+        let (id, keys) =
+            split_send_keys_positionals(Some("agent".into()), vec!["up".into()], false);
+        assert_eq!(id, Some("agent".into()));
+        assert_eq!(keys, vec!["up".to_string()]);
     }
 }

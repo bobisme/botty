@@ -194,7 +194,10 @@ impl AgentHandle {
     /// Send text with explicit newline control.
     async fn send_raw(&self, text: &str, newline: bool) -> Result<(), TestError> {
         let request = Request::Send {
-            id: self.id.clone(),
+            id: Some(self.id.clone()),
+            labels: Vec::new(),
+            all: false,
+            proc_filter: None,
             data: text.to_string(),
             newline,
             enter: false,
@@ -228,7 +231,10 @@ impl AgentHandle {
     /// Send raw bytes to the agent.
     pub async fn send_bytes(&self, data: &[u8]) -> Result<(), TestError> {
         let request = Request::SendBytes {
-            id: self.id.clone(),
+            id: Some(self.id.clone()),
+            labels: Vec::new(),
+            all: false,
+            proc_filter: None,
             data: data.to_vec(),
         };
 

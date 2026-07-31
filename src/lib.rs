@@ -36,12 +36,15 @@ pub fn has_systemd_run() -> bool {
 }
 
 pub use attach::{AttachConfig, AttachError, run_attach};
-pub use cli::{Cli, Command, parse_key_notation, parse_key_sequence};
+pub use cli::{
+    Cli, Command, parse_key_notation, parse_key_sequence, split_send_keys_positionals,
+    split_send_positionals,
+};
 pub use client::{Client, ClientError, default_socket_path};
 pub use output::{OutputFormat, json_envelope, resolve_format, text_record};
 pub use protocol::{
     AgentInfo, AgentState, DumpFormat, Event, ExitReason, RecordedCommand, Request, ResourceLimits,
-    Response,
+    Response, SendOutcome,
 };
 pub use server::{Server, ServerError};
 pub use testing::{AgentHandle, TestError, TestHarness};

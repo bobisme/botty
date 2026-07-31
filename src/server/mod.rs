@@ -348,6 +348,219 @@ fn wrap_bracketed_paste(text: &str) -> Vec<u8> {
     out
 }
 
+/// Resolve the agents a request targets, from an explicit ID or the
+/// `--all` / `--label` / `--proc` selectors.
+///
+/// Follows the precedence `kill` and `signal` established: an explicit ID wins
+/// and is returned unchecked, so the caller reports "agent not found" after its
+/// own lookup. Otherwise the selectors match running agents only, `AND`ed
+/// together when combined.
+///
+/// `empty_all_msg` is the error for `--all` matching nothing, which reads
+/// differently per command ("no running agents to kill" vs "to send to").
+fn resolve_targets(
+    mgr: &AgentManager,
+    id: Option<&str>,
+    all: bool,
+    labels: &[String],
+    proc_filter: Option<&str>,
+    empty_all_msg: &str,
+) -> Result<Vec<String>, String> {
+    if let Some(agent_id) = id {
+        return Ok(vec![agent_id.to_string()]);
+    }
+
+    if !all && labels.is_empty() && proc_filter.is_none() {
+        return Err("must specify agent ID, --label, --proc, or --all".to_string());
+    }
+
+    // `--all` takes precedence over the filters rather than intersecting with
+    // them, matching what `kill` has always done.
+    let matched: Vec<String> = if all {
+        mgr.list()
+            .filter(|a| a.is_running())
+            .map(|a| a.id.clone())
+            .collect()
+    } else {
+        mgr.list()
+            .filter(|a| {
+                if !a.is_running() {
+                    return false;
+                }
+                if !labels.is_empty() && !a.has_labels(labels) {
+                    return false;
+                }
+                if let Some(pf) = proc_filter
+                    && !a.command.join(" ").contains(pf)
+                {
+                    return false;
+                }
+                true
+            })
+            .map(|a| a.id.clone())
+            .collect()
+    };
+
+    if matched.is_empty() {
+        if all {
+            return Err(empty_all_msg.to_string());
+        }
+        if proc_filter.is_some() && !labels.is_empty() {
+            return Err("no agents match the specified process filter and labels".to_string());
+        }
+        if proc_filter.is_some() {
+            return Err("no agents match the specified process filter".to_string());
+        }
+        return Err("no agents match the specified labels".to_string());
+    }
+
+    Ok(matched)
+}
+
+/// A target resolved for writing: its ID, an owned PTY descriptor, and the
+/// agent's write lock. Collected under the manager lock, used after releasing
+/// it.
+struct SendTarget {
+    id: String,
+    fd: std::os::fd::OwnedFd,
+    write_lock: Arc<crate::runtime::sync::Mutex<()>>,
+}
+
+/// Resolve targets, record the command against each, and duplicate their PTY
+/// descriptors -- all under one acquisition of the manager lock, which is
+/// released by the time this returns.
+///
+/// Returns the writable targets plus any outcomes already settled (an agent
+/// that vanished or whose descriptor could not be duplicated). With a single
+/// explicit ID those cases are errors instead, preserving the old contract.
+#[allow(clippy::too_many_arguments)]
+async fn collect_send_targets(
+    manager: &Arc<Mutex<AgentManager>>,
+    id: Option<&str>,
+    all: bool,
+    labels: &[String],
+    proc_filter: Option<&str>,
+    selector_used: bool,
+    command: &str,
+    recorded_payload: &str,
+) -> Result<(Vec<SendTarget>, Vec<crate::protocol::SendOutcome>), String> {
+    use crate::protocol::SendOutcome;
+
+    let mut mgr = manager.lock().await;
+    let ids = resolve_targets(
+        &mgr,
+        id,
+        all,
+        labels,
+        proc_filter,
+        "no running agents to send to",
+    )?;
+
+    let mut targets = Vec::with_capacity(ids.len());
+    let mut settled = Vec::new();
+
+    for target_id in ids {
+        let Some(agent) = mgr.get_mut(&target_id) else {
+            if selector_used {
+                // Raced with a kill between matching and writing.
+                settled.push(SendOutcome::failed(
+                    target_id,
+                    "agent disappeared".to_string(),
+                ));
+                continue;
+            }
+            return Err(format!("agent not found: {target_id}"));
+        };
+
+        agent.record_command(command, recorded_payload);
+
+        match dup_pty_fd(agent) {
+            Ok(fd) => targets.push(SendTarget {
+                id: target_id,
+                fd,
+                write_lock: Arc::clone(&agent.write_lock),
+            }),
+            Err(e) => {
+                if !selector_used {
+                    return Err(e);
+                }
+                settled.push(SendOutcome::failed(target_id, e));
+            }
+        }
+    }
+
+    Ok((targets, settled))
+}
+
+/// Deliver `body` (and an optional `submit_key` after `delay_ms`) to every
+/// target, concurrently.
+///
+/// One task per agent, each taking only its own write lock: the per-agent
+/// submit delays overlap instead of stacking, and no task ever holds two locks,
+/// so there is no ordering hazard between concurrent fan-outs.
+async fn fan_out_writes(
+    targets: Vec<SendTarget>,
+    body: Arc<Vec<u8>>,
+    submit_key: Arc<Vec<u8>>,
+    delay_ms: u64,
+) -> Vec<crate::protocol::SendOutcome> {
+    use crate::protocol::SendOutcome;
+
+    let handles: Vec<_> = targets
+        .into_iter()
+        .map(|target| {
+            let body = Arc::clone(&body);
+            let submit_key = Arc::clone(&submit_key);
+            let id = target.id.clone();
+            let handle = crate::runtime::task::spawn(async move {
+                let _write_guard = target.write_lock.lock().await;
+
+                write_all_pty(&target.fd, &body).await?;
+
+                if !submit_key.is_empty() {
+                    if delay_ms > 0 {
+                        crate::runtime::time::sleep(Duration::from_millis(delay_ms)).await;
+                    }
+                    write_all_pty(&target.fd, &submit_key).await?;
+                }
+                Ok::<(), String>(())
+            });
+            (id, handle)
+        })
+        .collect();
+
+    let mut results = Vec::with_capacity(handles.len());
+    for (id, handle) in handles {
+        match handle.await {
+            Ok(Ok(())) => results.push(SendOutcome::delivered(id)),
+            Ok(Err(e)) => results.push(SendOutcome::failed(id, e)),
+            Err(e) => results.push(SendOutcome::failed(id, format!("write task failed: {e}"))),
+        }
+    }
+    results
+}
+
+/// Collapse fan-out results into the response shape the request asked for.
+///
+/// A request naming a single agent keeps the original `Ok`/`Error` contract;
+/// anything selector-based gets the per-agent list, so partial failure is
+/// always visible.
+fn send_response(
+    results: Vec<crate::protocol::SendOutcome>,
+    selector_used: bool,
+) -> crate::protocol::Response {
+    if selector_used {
+        return Response::SendResults { results };
+    }
+    match results.into_iter().next() {
+        Some(outcome) => match outcome.error {
+            Some(e) => Response::error(e),
+            None => Response::Ok,
+        },
+        None => Response::error("no agents matched"),
+    }
+}
+
 /// Duplicate an agent's PTY master fd for use after the manager lock is gone.
 ///
 /// The `dup(2)` matters for lifetime, not just convenience: once the lock is
@@ -840,56 +1053,17 @@ async fn handle_request(
 
             let mgr = manager.lock().await;
 
-            // Determine which agents to kill
-            let targets: Vec<String> = if let Some(ref agent_id) = id {
-                // Kill by specific ID
-                vec![agent_id.clone()]
-            } else if all {
-                // Kill all running agents
-                mgr.list()
-                    .filter(|a| a.is_running())
-                    .map(|a| a.id.clone())
-                    .collect()
-            } else if proc_filter.is_some() || !labels.is_empty() {
-                // Kill by proc filter and/or labels (AND logic when both specified)
-                mgr.list()
-                    .filter(|a| {
-                        if !a.is_running() {
-                            return false;
-                        }
-                        if !labels.is_empty() && !a.has_labels(&labels) {
-                            return false;
-                        }
-                        if let Some(ref pf) = proc_filter
-                            && !a.command.join(" ").contains(pf.as_str())
-                        {
-                            return false;
-                        }
-                        true
-                    })
-                    .map(|a| a.id.clone())
-                    .collect()
-            } else {
-                return Response::error("must specify agent ID, --label, --proc, or --all");
+            let targets = match resolve_targets(
+                &mgr,
+                id.as_deref(),
+                all,
+                &labels,
+                proc_filter.as_deref(),
+                "no running agents to kill",
+            ) {
+                Ok(targets) => targets,
+                Err(e) => return Response::error(e),
             };
-
-            if targets.is_empty() {
-                if let Some(id) = &id {
-                    return Response::error(format!("agent not found: {id}"));
-                }
-                if all {
-                    return Response::error("no running agents to kill");
-                }
-                if proc_filter.is_some() && !labels.is_empty() {
-                    return Response::error(
-                        "no agents match the specified process filter and labels",
-                    );
-                }
-                if proc_filter.is_some() {
-                    return Response::error("no agents match the specified process filter");
-                }
-                return Response::error("no agents match the specified labels");
-            }
 
             let sig = Signal::try_from(signal).unwrap_or(Signal::SIGTERM);
             let mut errors = Vec::new();
@@ -925,12 +1099,17 @@ async fn handle_request(
 
         Request::Send {
             id,
+            labels,
+            all,
+            proc_filter,
             data,
             newline,
             enter,
             submit_delay_ms,
             paste,
         } => {
+            let selector_used = all || !labels.is_empty() || proc_filter.is_some();
+
             // The submit key goes out in its own write(2), after a pause, so
             // the TUI sees a keypress rather than a newline buried in a pasted
             // burst. See DEFAULT_SUBMIT_DELAY_MS.
@@ -948,66 +1127,67 @@ async fn handle_request(
                 data.clone().into_bytes()
             };
 
-            // Take the fd and the per-agent write lock, then release the
-            // manager lock before writing: the writes below can block on a
-            // full PTY buffer, and draining that buffer needs this same lock.
-            let (fd, write_lock) = {
-                let mut mgr = manager.lock().await;
-                let Some(agent) = mgr.get_mut(&id) else {
-                    return Response::error(format!("agent not found: {id}"));
-                };
-
-                let payload = if submit_key.is_empty() {
-                    data.clone()
-                } else {
-                    format!("{data}\n")
-                };
-                agent.record_command("send", &payload);
-
-                match dup_pty_fd(agent) {
-                    Ok(fd) => (fd, Arc::clone(&agent.write_lock)),
-                    Err(e) => return Response::error(e),
-                }
+            let recorded = if submit_key.is_empty() {
+                data.clone()
+            } else {
+                format!("{data}\n")
             };
 
-            let _write_guard = write_lock.lock().await;
+            // Collect fds and write locks, then release the manager lock before
+            // writing: the writes below can block on a full PTY buffer, and
+            // draining that buffer needs this same lock.
+            let (targets, mut results) = match collect_send_targets(
+                manager,
+                id.as_deref(),
+                all,
+                &labels,
+                proc_filter.as_deref(),
+                selector_used,
+                "send",
+                &recorded,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => return Response::error(e),
+            };
 
-            if let Err(e) = write_all_pty(&fd, &body).await {
-                return Response::error(e);
-            }
+            let delay = submit_delay_ms.unwrap_or(crate::protocol::DEFAULT_SUBMIT_DELAY_MS);
+            results
+                .extend(fan_out_writes(targets, Arc::new(body), Arc::new(submit_key), delay).await);
 
-            if !submit_key.is_empty() {
-                let delay = submit_delay_ms.unwrap_or(crate::protocol::DEFAULT_SUBMIT_DELAY_MS);
-                if delay > 0 {
-                    crate::runtime::time::sleep(Duration::from_millis(delay)).await;
-                }
-                if let Err(e) = write_all_pty(&fd, &submit_key).await {
-                    return Response::error(e);
-                }
-            }
-
-            Response::Ok
+            send_response(results, selector_used)
         }
 
-        Request::SendBytes { id, data } => {
-            let (fd, write_lock) = {
-                let mut mgr = manager.lock().await;
-                let Some(agent) = mgr.get_mut(&id) else {
-                    return Response::error(format!("agent not found: {id}"));
-                };
-                agent.record_command("send_bytes", hex::encode(&data));
+        Request::SendBytes {
+            id,
+            labels,
+            all,
+            proc_filter,
+            data,
+        } => {
+            let selector_used = all || !labels.is_empty() || proc_filter.is_some();
+            let recorded = hex::encode(&data);
 
-                match dup_pty_fd(agent) {
-                    Ok(fd) => (fd, Arc::clone(&agent.write_lock)),
-                    Err(e) => return Response::error(e),
-                }
+            let (targets, mut results) = match collect_send_targets(
+                manager,
+                id.as_deref(),
+                all,
+                &labels,
+                proc_filter.as_deref(),
+                selector_used,
+                "send_bytes",
+                &recorded,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => return Response::error(e),
             };
 
-            let _write_guard = write_lock.lock().await;
-            match write_all_pty(&fd, &data).await {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::error(e),
-            }
+            results.extend(fan_out_writes(targets, Arc::new(data), Arc::new(Vec::new()), 0).await);
+
+            send_response(results, selector_used)
         }
 
         Request::Tail {

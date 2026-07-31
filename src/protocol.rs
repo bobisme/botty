@@ -122,10 +122,20 @@ pub enum Request {
         proc_filter: Option<String>,
     },
 
-    /// Send UTF-8 text input to an agent.
+    /// Send UTF-8 text input to an agent, or to every agent a selector matches.
     Send {
-        /// Agent ID.
-        id: String,
+        /// Agent ID. Optional when using `labels`, `proc_filter`, or `all`.
+        #[serde(default)]
+        id: Option<String>,
+        /// Send to all running agents with these labels.
+        #[serde(default)]
+        labels: Vec<String>,
+        /// Send to all running agents.
+        #[serde(default)]
+        all: bool,
+        /// Send to running agents whose command contains this substring.
+        #[serde(default)]
+        proc_filter: Option<String>,
         /// Text to send.
         data: String,
         /// Whether to append a newline (LF).
@@ -147,10 +157,20 @@ pub enum Request {
         paste: bool,
     },
 
-    /// Send raw bytes to an agent.
+    /// Send raw bytes to an agent, or to every agent a selector matches.
     SendBytes {
-        /// Agent ID.
-        id: String,
+        /// Agent ID. Optional when using `labels`, `proc_filter`, or `all`.
+        #[serde(default)]
+        id: Option<String>,
+        /// Send to all running agents with these labels.
+        #[serde(default)]
+        labels: Vec<String>,
+        /// Send to all running agents.
+        #[serde(default)]
+        all: bool,
+        /// Send to running agents whose command contains this substring.
+        #[serde(default)]
+        proc_filter: Option<String>,
         /// Raw bytes (base64 encoded in JSON).
         #[serde(with = "base64_bytes")]
         data: Vec<u8>,
@@ -345,6 +365,19 @@ pub enum Response {
         agents: Vec<AgentInfo>,
     },
 
+    /// Per-agent outcomes of a selector-based `Send`/`SendBytes`.
+    ///
+    /// Sent instead of [`Response::Ok`] whenever the request used `all`,
+    /// `labels`, or `proc_filter`. A fan-out can succeed for some agents and
+    /// fail for others, and a bare `Ok` would report that as total success --
+    /// the same "looks delivered, wasn't" failure the separate-write submit
+    /// key exists to avoid. Requests naming a single `id` still answer with
+    /// `Ok`/`Error`, so existing callers are unaffected.
+    SendResults {
+        /// One entry per matched agent, in match order.
+        results: Vec<SendOutcome>,
+    },
+
     /// Raw output bytes (for tail without follow).
     Output {
         /// Output data (base64 encoded in JSON).
@@ -513,6 +546,39 @@ const fn default_true() -> bool {
 /// line-oriented program (a shell) can pass `Some(0)` to skip the wait.
 pub const DEFAULT_SUBMIT_DELAY_MS: u64 = 50;
 
+/// Outcome of delivering input to one agent in a fan-out send.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SendOutcome {
+    /// The agent the input was addressed to.
+    pub id: String,
+    /// Why delivery failed, or `None` if the bytes were written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl SendOutcome {
+    /// Record a successful delivery.
+    #[must_use]
+    pub const fn delivered(id: String) -> Self {
+        Self { id, error: None }
+    }
+
+    /// Record a failed delivery.
+    #[must_use]
+    pub const fn failed(id: String, error: String) -> Self {
+        Self {
+            id,
+            error: Some(error),
+        }
+    }
+
+    /// Whether the input reached this agent.
+    #[must_use]
+    pub const fn is_ok(&self) -> bool {
+        self.error.is_none()
+    }
+}
+
 /// Bracketed-paste introducer, `ESC [ 200 ~`.
 ///
 /// A TUI that has enabled bracketed paste (DECSET 2004) treats everything up
@@ -598,7 +664,10 @@ mod tests {
                 proc_filter: None,
             },
             Request::Send {
-                id: "test-agent".into(),
+                id: Some("test-agent".into()),
+                labels: Vec::new(),
+                all: false,
+                proc_filter: None,
                 data: "hello\n".into(),
                 newline: false,
                 enter: false,
@@ -606,7 +675,10 @@ mod tests {
                 paste: false,
             },
             Request::SendBytes {
-                id: "test-agent".into(),
+                id: Some("test-agent".into()),
+                labels: Vec::new(),
+                all: false,
+                proc_filter: None,
                 data: vec![0x1b, 0x5b, 0x41], // ESC [ A (up arrow)
             },
             Request::Tail {
@@ -778,7 +850,10 @@ mod tests {
     #[test]
     fn test_base64_bytes_encoding() {
         let req = Request::SendBytes {
-            id: "test".into(),
+            id: Some("test".into()),
+            labels: Vec::new(),
+            all: false,
+            proc_filter: None,
             data: vec![0x1b, 0x5b, 0x41],
         };
         let json = serde_json::to_string(&req).unwrap();
