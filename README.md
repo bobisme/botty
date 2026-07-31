@@ -79,6 +79,8 @@ vessel signal worker --signal USR1
 vessel send worker "make test" -n
 vessel send worker "run the tests" -e     # -e/--enter submits (CR)
 vessel send worker "ls" -n --submit-delay-ms 0   # skip the pre-key pause
+vessel send agent "$PROMPT" -p -e         # -p/--paste: multi-line prompt, then submit
+vessel send agent - -p -e < prompt.md     # "-" reads the payload from stdin
 vessel send-bytes worker 1b5b41           # up arrow
 vessel send-keys worker ctrl-c enter
 vessel tail worker -f
@@ -95,6 +97,29 @@ into the composer instead of submitting it, so the prompt sits there looking
 delivered. The pause puts the key outside that burst. Use
 `--submit-delay-ms 0` to write it immediately (fine for shells and other
 line-oriented programs), or raise it for a TUI that still swallows the key.
+
+#### Multi-line prompts
+
+Use `--paste` (`-p`) for any prompt that spans more than one line. It wraps the
+text in bracketed-paste markers (`ESC[200~` … `ESC[201~`), which a TUI reads as
+a single paste: the newlines become lines in the composer. Without it the first
+newline submits a truncated prompt and every remaining line lands as its own
+turn — three separate agent turns for one prompt, each billed, none of them
+what was asked.
+
+`--paste --enter` is the usual orchestrator pairing: paste the whole prompt,
+then submit it as one turn. Pass `-` as the text to read the payload from
+stdin, which avoids quoting a long prompt onto the command line:
+
+```bash
+vessel send agent - --paste --enter <<'PROMPT'
+Refactor the parser to use the new token stream.
+Keep the existing public API.
+PROMPT
+```
+
+Any `ESC[201~` inside the text is dropped rather than forwarded — it would
+otherwise close the bracket early and deliver the remainder as live keystrokes.
 
 ### Synchronization and assertions
 

@@ -192,6 +192,40 @@ fn test_send_and_snapshot() {
     env.vessel().args(["kill", &agent_id]).assert().success();
 }
 
+// bn-1a0f: "-" reads the payload from stdin, so a long prompt does not have to
+// be quoted onto the command line.
+#[test]
+fn test_send_reads_text_from_stdin() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    let output = env
+        .vessel()
+        .args(["spawn", "--", "bash"])
+        .output()
+        .expect("failed to run spawn");
+    assert!(output.status.success());
+    let agent_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    std::thread::sleep(Duration::from_millis(200));
+
+    env.vessel()
+        .args(["send", &agent_id, "-", "--newline"])
+        .write_stdin("echo STDIN_SOURCED_PROMPT")
+        .assert()
+        .success();
+
+    std::thread::sleep(Duration::from_millis(400));
+
+    env.vessel()
+        .args(["snapshot", &agent_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("STDIN_SOURCED_PROMPT"));
+
+    env.vessel().args(["kill", &agent_id]).assert().success();
+}
+
 #[test]
 fn test_tail() {
     let mut env = TestEnv::new();

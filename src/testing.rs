@@ -201,6 +201,7 @@ impl AgentHandle {
             // Default delay: harnesses drive TUIs as often as shells, so be
             // correct by default rather than 50ms faster.
             submit_delay_ms: None,
+            paste: false,
         };
 
         let response = self

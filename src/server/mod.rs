@@ -319,6 +319,35 @@ const PTY_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Backoff between retries while the PTY input buffer is full.
 const PTY_WRITE_RETRY: Duration = Duration::from_millis(1);
 
+/// Wrap `text` in bracketed-paste markers.
+///
+/// Any `ESC [ 201 ~` already inside `text` is dropped rather than forwarded.
+/// It would otherwise close the bracket early, and everything after it would
+/// arrive as ordinary keystrokes — so a prompt that merely quotes the sequence
+/// (a transcript of a terminal session, say) could submit itself partway
+/// through, or run whatever followed as commands. Terminals filter the
+/// terminator out of pastes for the same reason.
+fn wrap_bracketed_paste(text: &str) -> Vec<u8> {
+    use crate::protocol::{PASTE_END, PASTE_START};
+
+    let mut out = Vec::with_capacity(text.len() + PASTE_START.len() + PASTE_END.len());
+    out.extend_from_slice(PASTE_START);
+
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(PASTE_END) {
+            i += PASTE_END.len();
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+
+    out.extend_from_slice(PASTE_END);
+    out
+}
+
 /// Duplicate an agent's PTY master fd for use after the manager lock is gone.
 ///
 /// The `dup(2)` matters for lifetime, not just convenience: once the lock is
@@ -900,6 +929,7 @@ async fn handle_request(
             newline,
             enter,
             submit_delay_ms,
+            paste,
         } => {
             // The submit key goes out in its own write(2), after a pause, so
             // the TUI sees a keypress rather than a newline buried in a pasted
@@ -911,6 +941,12 @@ async fn handle_request(
             if enter {
                 submit_key.push(b'\r');
             }
+
+            let body = if paste {
+                wrap_bracketed_paste(&data)
+            } else {
+                data.clone().into_bytes()
+            };
 
             // Take the fd and the per-agent write lock, then release the
             // manager lock before writing: the writes below can block on a
@@ -936,7 +972,7 @@ async fn handle_request(
 
             let _write_guard = write_lock.lock().await;
 
-            if let Err(e) = write_all_pty(&fd, data.as_bytes()).await {
+            if let Err(e) = write_all_pty(&fd, &body).await {
                 return Response::error(e);
             }
 
@@ -1657,5 +1693,63 @@ impl UmaskGuard {
 impl Drop for UmaskGuard {
     fn drop(&mut self) {
         nix::sys::stat::umask(self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{PASTE_END, PASTE_START};
+
+    #[test]
+    fn wraps_text_in_paste_markers() {
+        let out = wrap_bracketed_paste("line one\nline two");
+        assert!(out.starts_with(PASTE_START));
+        assert!(out.ends_with(PASTE_END));
+
+        // The newline survives inside the envelope: that is the whole point,
+        // it becomes a line in the composer rather than a submission.
+        let inner = &out[PASTE_START.len()..out.len() - PASTE_END.len()];
+        assert_eq!(inner, b"line one\nline two");
+    }
+
+    #[test]
+    fn empty_text_still_produces_a_well_formed_envelope() {
+        let out = wrap_bracketed_paste("");
+        assert_eq!(out, [PASTE_START, PASTE_END].concat());
+    }
+
+    #[test]
+    fn strips_embedded_paste_terminator() {
+        // A prompt that quotes ESC[201~ must not be able to close the bracket
+        // early and have its remainder delivered as live keystrokes.
+        let text = "before\x1b[201~after";
+        let out = wrap_bracketed_paste(text);
+
+        let inner = &out[PASTE_START.len()..out.len() - PASTE_END.len()];
+        assert_eq!(inner, b"beforeafter");
+
+        // Exactly one terminator in the whole payload: the one we appended.
+        let count = out
+            .windows(PASTE_END.len())
+            .filter(|w| *w == PASTE_END)
+            .count();
+        assert_eq!(count, 1, "payload must contain exactly one terminator");
+    }
+
+    #[test]
+    fn strips_repeated_and_adjacent_terminators() {
+        let out = wrap_bracketed_paste("a\x1b[201~\x1b[201~b");
+        let inner = &out[PASTE_START.len()..out.len() - PASTE_END.len()];
+        assert_eq!(inner, b"ab");
+    }
+
+    #[test]
+    fn leaves_the_paste_introducer_alone() {
+        // Only the terminator can break out of the envelope; a quoted
+        // introducer is inert, so it is passed through unchanged.
+        let out = wrap_bracketed_paste("a\x1b[200~b");
+        let inner = &out[PASTE_START.len()..out.len() - PASTE_END.len()];
+        assert_eq!(inner, b"a\x1b[200~b");
     }
 }

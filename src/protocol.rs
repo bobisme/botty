@@ -141,6 +141,10 @@ pub enum Request {
         /// Only meaningful when `newline` or `enter` is set.
         #[serde(default)]
         submit_delay_ms: Option<u64>,
+        /// Wrap the text in bracketed-paste markers so a TUI takes it as one
+        /// paste rather than as typed keystrokes. See [`PASTE_START`].
+        #[serde(default)]
+        paste: bool,
     },
 
     /// Send raw bytes to an agent.
@@ -509,6 +513,18 @@ const fn default_true() -> bool {
 /// line-oriented program (a shell) can pass `Some(0)` to skip the wait.
 pub const DEFAULT_SUBMIT_DELAY_MS: u64 = 50;
 
+/// Bracketed-paste introducer, `ESC [ 200 ~`.
+///
+/// A TUI that has enabled bracketed paste (DECSET 2004) treats everything up
+/// to [`PASTE_END`] as a single paste: newlines inside it become literal lines
+/// in the composer rather than submissions. Without it, sending a multi-line
+/// prompt submits a truncated first line and turns each remaining line into
+/// its own turn.
+pub const PASTE_START: &[u8] = b"\x1b[200~";
+
+/// Bracketed-paste terminator, `ESC [ 201 ~`. See [`PASTE_START`].
+pub const PASTE_END: &[u8] = b"\x1b[201~";
+
 /// Maximum length, in bytes, of a base64-encoded `SendBytes` payload accepted
 /// during deserialization.
 ///
@@ -587,6 +603,7 @@ mod tests {
                 newline: false,
                 enter: false,
                 submit_delay_ms: None,
+                paste: false,
             },
             Request::SendBytes {
                 id: "test-agent".into(),

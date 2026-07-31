@@ -180,6 +180,7 @@ vessel::async_test! {
                 newline: true,
                 enter: false,
                 submit_delay_ms: None,
+                paste: false,
             })
             .await
             .expect("send failed");

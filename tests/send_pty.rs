@@ -101,6 +101,7 @@ vessel::async_test! {
                 newline: false,
                 enter: false,
                 submit_delay_ms: None,
+                paste: false,
             })
             .await
             .expect("send failed");
@@ -196,6 +197,7 @@ vessel::async_test! {
                 newline: false,
                 enter: true,
                 submit_delay_ms: Some(300),
+                paste: false,
             })
             .await
             .expect("send failed");
@@ -218,6 +220,7 @@ vessel::async_test! {
                 newline: false,
                 enter: true,
                 submit_delay_ms: Some(0),
+                paste: false,
             })
             .await
             .expect("send failed");
@@ -226,6 +229,219 @@ vessel::async_test! {
         assert!(
             elapsed < Duration::from_millis(200),
             "submit_delay_ms: Some(0) should not wait, took {elapsed:?}"
+        );
+
+        let _ = client
+            .request(Request::Kill {
+                id: Some(agent_id),
+                labels: vec![],
+                all: false,
+                signal: 9,
+                proc_filter: None,
+            })
+            .await;
+        let _ = client.request(Request::Shutdown).await;
+    }
+}
+
+// bn-1a0f: --paste must wrap the payload in bracketed-paste markers so a TUI
+// takes a multi-line prompt as one paste. `cat` echoes its stdin verbatim, so
+// the markers are observable in the transcript.
+vessel::async_test! {
+    async fn test_send_paste_wraps_payload_in_markers() {
+        let socket_path = unique_socket_path();
+        let _cleanup = SocketCleanup(socket_path.clone());
+
+        let server_socket = socket_path.clone();
+        runtime::task::spawn(async move {
+            let mut server = Server::new(server_socket);
+            let _ = server.run().await;
+        });
+        runtime::time::sleep(Duration::from_millis(100)).await;
+
+        let mut client = Client::new(socket_path);
+        let response = client
+            .request(Request::Spawn {
+                cmd: vec!["cat".into()],
+                name: None,
+                labels: vec![],
+                rows: 24,
+                cols: 80,
+                timeout: None,
+                max_output: None,
+                env: vec![],
+                cwd: None,
+                no_resize: false,
+                record: false,
+                memory_limit: None,
+            })
+            .await
+            .expect("spawn failed");
+
+        let agent_id = match response {
+            Response::Spawned { id, .. } => id,
+            other => panic!("expected Spawned, got {:?}", other),
+        };
+        runtime::time::sleep(Duration::from_millis(200)).await;
+
+        let response = client
+            .request(Request::Send {
+                id: agent_id.clone(),
+                data: "first\nsecond\nthird".into(),
+                newline: false,
+                enter: false,
+                submit_delay_ms: None,
+                paste: true,
+            })
+            .await
+            .expect("send failed");
+        assert!(matches!(response, Response::Ok), "got {:?}", response);
+
+        // The closing marker has no trailing newline, so the line discipline
+        // holds it in the canonical buffer and `cat` has not read it yet.
+        // Flush with a bare newline so the envelope reaches `cat` and comes
+        // back as real bytes; the terminal's own echo renders ESC as "^[".
+        let response = client
+            .request(Request::Send {
+                id: agent_id.clone(),
+                data: String::new(),
+                newline: true,
+                enter: false,
+                submit_delay_ms: Some(0),
+                paste: false,
+            })
+            .await
+            .expect("flush send failed");
+        assert!(matches!(response, Response::Ok), "got {:?}", response);
+
+        runtime::time::sleep(Duration::from_millis(500)).await;
+
+        let response = client
+            .request(Request::Dump {
+                id: agent_id.clone(),
+                since: None,
+                format: Default::default(),
+            })
+            .await
+            .expect("dump failed");
+
+        let transcript = match response {
+            Response::Output { data, .. } => data,
+            other => panic!("expected Output, got {:?}", other),
+        };
+
+        // Match real ESC bytes, which only appear in `cat`'s output -- the
+        // echoed copy uses the printable "^[" rendering.
+        let find = |needle: &[u8]| {
+            transcript
+                .windows(needle.len())
+                .position(|w| w == needle)
+        };
+
+        let start = find(b"\x1b[200~").expect("paste introducer missing from transcript");
+        let end = find(b"\x1b[201~").expect("paste terminator missing from transcript");
+        assert!(start < end, "introducer must precede terminator");
+
+        // All three lines land inside the envelope, newlines intact.
+        let body = &transcript[start + 6..end];
+        let text = String::from_utf8_lossy(body);
+        assert!(text.contains("first"), "body missing 'first': {text:?}");
+        assert!(text.contains("second"), "body missing 'second': {text:?}");
+        assert!(text.contains("third"), "body missing 'third': {text:?}");
+
+        let _ = client
+            .request(Request::Kill {
+                id: Some(agent_id),
+                labels: vec![],
+                all: false,
+                signal: 9,
+                proc_filter: None,
+            })
+            .await;
+        let _ = client.request(Request::Shutdown).await;
+    }
+}
+
+// bn-1a0f + bn-2eg together: --paste --enter is the orchestrator's workflow --
+// deliver a multi-line prompt as one paste, then submit it. The CR must land
+// outside the paste envelope, or it is just more pasted content.
+vessel::async_test! {
+    async fn test_send_paste_with_enter_puts_key_outside_the_envelope() {
+        let socket_path = unique_socket_path();
+        let _cleanup = SocketCleanup(socket_path.clone());
+
+        let server_socket = socket_path.clone();
+        runtime::task::spawn(async move {
+            let mut server = Server::new(server_socket);
+            let _ = server.run().await;
+        });
+        runtime::time::sleep(Duration::from_millis(100)).await;
+
+        let mut client = Client::new(socket_path);
+        let response = client
+            .request(Request::Spawn {
+                cmd: vec!["cat".into()],
+                name: None,
+                labels: vec![],
+                rows: 24,
+                cols: 80,
+                timeout: None,
+                max_output: None,
+                env: vec![],
+                cwd: None,
+                no_resize: false,
+                record: false,
+                memory_limit: None,
+            })
+            .await
+            .expect("spawn failed");
+
+        let agent_id = match response {
+            Response::Spawned { id, .. } => id,
+            other => panic!("expected Spawned, got {:?}", other),
+        };
+        runtime::time::sleep(Duration::from_millis(200)).await;
+
+        let response = client
+            .request(Request::Send {
+                id: agent_id.clone(),
+                data: "alpha\nbeta".into(),
+                newline: false,
+                enter: true,
+                submit_delay_ms: Some(60),
+                paste: true,
+            })
+            .await
+            .expect("send failed");
+        assert!(matches!(response, Response::Ok), "got {:?}", response);
+
+        runtime::time::sleep(Duration::from_millis(500)).await;
+
+        let response = client
+            .request(Request::Dump {
+                id: agent_id.clone(),
+                since: None,
+                format: Default::default(),
+            })
+            .await
+            .expect("dump failed");
+
+        let transcript = match response {
+            Response::Output { data, .. } => data,
+            other => panic!("expected Output, got {:?}", other),
+        };
+
+        let end = transcript
+            .windows(6)
+            .position(|w| w == b"\x1b[201~")
+            .expect("paste terminator missing from transcript");
+
+        // The CR is echoed after the closing marker, not inside it.
+        let after_envelope = &transcript[end + 6..];
+        assert!(
+            after_envelope.contains(&b'\r') || after_envelope.contains(&b'\n'),
+            "submit key did not arrive after the paste envelope: {:?}",
+            String::from_utf8_lossy(after_envelope)
         );
 
         let _ = client

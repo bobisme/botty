@@ -278,6 +278,12 @@ pub enum Command {
     /// Use --newline to append a newline character, or --enter to append
     /// a carriage return (like pressing Enter in a terminal).
     ///
+    /// Pass "-" as the text to read the payload from stdin, which avoids
+    /// quoting a long prompt on the command line.
+    ///
+    /// For a multi-line prompt to a TUI agent, use --paste: it wraps the text
+    /// in bracketed-paste markers so the whole thing lands as one prompt.
+    ///
     /// The submit key is written separately from the text, after a short
     /// pause, so full-screen TUIs register it as a keypress instead of
     /// absorbing it into the composer as pasted content. Tune the pause with
@@ -286,8 +292,16 @@ pub enum Command {
         /// Agent ID.
         id: String,
 
-        /// Text to send (optional when using --enter).
+        /// Text to send (optional when using --enter). Use "-" to read stdin.
         text: Option<String>,
+
+        /// Wrap the text in bracketed-paste markers (ESC[200~ .. ESC[201~).
+        ///
+        /// Required for multi-line prompts to full-screen TUIs: without it the
+        /// first newline submits a truncated prompt and each remaining line
+        /// lands as its own turn. Combine with --enter to paste then submit.
+        #[arg(short = 'p', long, alias = "bracketed")]
+        paste: bool,
 
         /// Append a newline (LF) after the text.
         #[arg(short = 'n', long)]

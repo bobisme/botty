@@ -901,18 +901,37 @@ async fn run_client(
         Command::Send {
             id,
             text,
+            paste,
             newline,
             enter,
             submit_delay_ms,
             format,
             json,
         } => {
+            // "-" reads the payload from stdin: prompts for coding agents are
+            // routinely too long to be comfortable as argv.
+            let data = match text.as_deref() {
+                Some("-") => {
+                    // Blocking read: this is a one-shot at command start, with
+                    // nothing else driving the runtime yet, and it keeps the
+                    // path identical across both runtime backends.
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut buf)
+                        .map_err(|e| format!("failed to read stdin: {e}"))?;
+                    buf
+                }
+                _ => text.unwrap_or_default(),
+            };
+
             let request = Request::Send {
                 id: id.clone(),
-                data: text.unwrap_or_default(),
+                data,
                 newline,
                 enter,
                 submit_delay_ms,
+                paste,
             };
             let response = client.request(request).await?;
 
@@ -1936,6 +1955,7 @@ async fn run_client(
                     newline: false, // Already has newline
                     enter: false,
                     submit_delay_ms: None,
+                    paste: false,
                 })
                 .await?;
 
