@@ -186,43 +186,53 @@ pub mod io {
 #[cfg(feature = "runtime-asupersync")]
 pub mod sync {
     use std::ops::{Deref, DerefMut};
+    use std::sync::Arc;
 
     /// Async mutex that hides asupersync's Cx requirement.
-    pub struct Mutex<T>(asupersync::sync::Mutex<T>);
+    ///
+    /// The inner mutex lives behind an `Arc` so `lock` can return an *owned*
+    /// guard. asupersync 0.3.10 deliberately made the borrowed `MutexGuard`
+    /// `!Send` (a `PhantomData<*mut ()>` marker), which forbids holding one
+    /// across an `.await` inside a spawned task -- and the server does exactly
+    /// that, in `handle_connection` and in the per-agent write fan-out.
+    /// `OwnedMutexGuard` is `Send` and is the supported way to hold a lock
+    /// across a suspension point.
+    ///
+    /// The extra `Arc` clone per acquisition is not on any hot path: the
+    /// manager lock is taken once per request and once per 10ms poll tick.
+    pub struct Mutex<T>(Arc<asupersync::sync::Mutex<T>>);
 
     impl<T> Mutex<T> {
         pub fn new(value: T) -> Self {
-            Self(asupersync::sync::Mutex::new(value))
+            Self(Arc::new(asupersync::sync::Mutex::new(value)))
         }
 
         /// # Panics
         ///
         /// Panics if called outside an async context, or if the underlying
         /// mutex has been poisoned by a panic while held.
-        pub async fn lock(&self) -> MutexGuard<'_, T> {
+        pub async fn lock(&self) -> MutexGuard<T> {
             let cx = asupersync::Cx::current().expect("Mutex::lock called outside async context");
-            let guard = self
-                .0
-                .lock(&cx)
+            let guard = asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&self.0), &cx)
                 .await
                 .expect("Mutex should not be poisoned");
             MutexGuard { guard }
         }
     }
 
-    /// Wrapper around asupersync's `MutexGuard` to keep the API opaque.
-    pub struct MutexGuard<'a, T> {
-        guard: asupersync::sync::MutexGuard<'a, T>,
+    /// Wrapper around asupersync's `OwnedMutexGuard` to keep the API opaque.
+    pub struct MutexGuard<T> {
+        guard: asupersync::sync::OwnedMutexGuard<T>,
     }
 
-    impl<T> Deref for MutexGuard<'_, T> {
+    impl<T> Deref for MutexGuard<T> {
         type Target = T;
         fn deref(&self) -> &T {
             &self.guard
         }
     }
 
-    impl<T> DerefMut for MutexGuard<'_, T> {
+    impl<T> DerefMut for MutexGuard<T> {
         fn deref_mut(&mut self) -> &mut T {
             &mut self.guard
         }
