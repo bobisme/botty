@@ -1,0 +1,4 @@
+shard: 2026-04.events
+event_count: 25
+byte_len: 10939
+file_hash: blake3:406d51150d58259d317bf5cb122ec19a3c57d5a11b425fd889fe4a3170bf51eb

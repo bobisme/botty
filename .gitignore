@@ -1,17 +1,5 @@
 /target
 
-# bv (beads viewer) local config and caches
-.bones/
-
-# BotBus agent coordination state (session-specific)
-.botbus/
-opencode.json
-
-# MAW agent workspaces
-.workspaces/
-
-# maw agent workspaces
-ws/
 # maw admin tree (consolidated layout) — runtime/admin only
 /.maw/
 /.manifold/
