@@ -617,10 +617,40 @@ async fn run_client(
                 wait_for_dependencies(&socket_path_ref, &after, &wait_for).await?;
             }
 
-            // --env-inherit: read named vars from client env, add to env list
-            for var_name in &env_inherit {
-                if let Ok(value) = std::env::var(var_name) {
-                    env.push(format!("{var_name}={value}"));
+            // --env-inherit: expand patterns against the client env, add to the
+            // env list. Patterns are exact names (EDITOR) or trailing-wildcard
+            // namespaces (RITE_*). A malformed pattern is a hard error, never a
+            // silent skip, so a typo cannot vanish into an empty expansion.
+            if !env_inherit.is_empty() {
+                // vars_os(), not vars(): a single non-UTF-8 name or value anywhere
+                // in the caller's env would make vars() panic and abort the spawn,
+                // even for a variable the pattern never matches. Non-UTF-8 vars are
+                // skipped — they cannot be carried in a KEY=VALUE string anyway.
+                let client_env: Vec<(String, String)> = std::env::vars_os()
+                    .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+                    .collect();
+                // Keys already set via --env win: skip inherited matches for them.
+                // A child shell resolves a duplicated key in an unspecified way, so
+                // the explicit value must be the only one that reaches the child.
+                let explicit_keys: std::collections::HashSet<&str> = env
+                    .iter()
+                    .filter_map(|kv| kv.split_once('=').map(|(k, _)| k))
+                    .collect();
+                let matched =
+                    vessel::env_inherit::resolve(&env_inherit, &client_env, &explicit_keys)?;
+                if !matched.is_empty() {
+                    // Audit trail: log the matched names, never the values. A
+                    // wildcard expansion is otherwise invisible, and it may pull
+                    // secrets from the named namespace into an untrusted worker.
+                    let names: Vec<&str> = matched.iter().map(|(n, _)| n.as_str()).collect();
+                    eprintln!(
+                        "vessel: --env-inherit matched {} var(s): {}",
+                        names.len(),
+                        names.join(", ")
+                    );
+                }
+                for (name, value) in matched {
+                    env.push(format!("{name}={value}"));
                 }
             }
 

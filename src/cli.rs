@@ -196,8 +196,14 @@ pub enum Command {
         env: Vec<String>,
 
         /// Inherit env vars from the calling shell (comma-separated names).
-        /// Reads each variable from the client's environment and passes it
-        /// to the spawned agent (e.g., --env-inherit `BOTBUS_AGENT,EDITOR`).
+        /// Reads each variable from the client's environment and passes it to
+        /// the spawned agent (e.g., --env-inherit `BOTBUS_AGENT,EDITOR`).
+        /// A trailing wildcard inherits a whole namespace: `RITE_*` matches
+        /// every `RITE_`-prefixed variable. The `*` is allowed only at the end
+        /// of a prefix that ends with `_`; leading/suffix forms like `*_TOKEN`
+        /// are rejected. Quote the pattern so the shell does not glob it.
+        /// A prefix limits scope to one namespace, but does not filter secrets:
+        /// `RITE_*` still passes any `RITE_`-prefixed token to the agent.
         #[arg(long, value_delimiter = ',')]
         env_inherit: Vec<String>,
 

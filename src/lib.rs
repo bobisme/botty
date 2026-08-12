@@ -9,6 +9,7 @@
 pub mod attach;
 pub mod cli;
 pub mod client;
+pub mod env_inherit;
 pub mod output;
 pub mod protocol;
 pub mod pty;
@@ -41,6 +42,7 @@ pub use cli::{
     split_send_positionals,
 };
 pub use client::{Client, ClientError, default_socket_path};
+pub use env_inherit::{EnvInheritError, EnvInheritSpec};
 pub use output::{OutputFormat, json_envelope, resolve_format, text_record};
 pub use protocol::{
     AgentInfo, AgentState, DumpFormat, Event, ExitReason, RecordedCommand, Request, ResourceLimits,

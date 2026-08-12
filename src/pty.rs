@@ -488,6 +488,34 @@ mod tests {
     }
 
     #[test]
+    fn a_duplicated_key_resolves_to_the_last_entry_in_the_child() {
+        // A key that appears twice in `vars` reaches the child twice, and the
+        // child shell resolves it to the LAST entry (dash/glibc behavior). This
+        // is why `--env` precedence cannot be left to ordering: the spawn handler
+        // instead drops inherited matches whose key is already set via `--env`
+        // (see env_inherit::resolve), so this duplicate case never occurs there.
+        let env = SpawnEnv {
+            vars: vec![
+                ("VESSEL_DUP".into(), "first".into()),
+                ("VESSEL_DUP".into(), "last".into()),
+            ],
+        };
+        let pty = spawn_with_env(
+            &["sh".into(), "-c".into(), "echo $VESSEL_DUP".into()],
+            24,
+            80,
+            &env,
+            None,
+        )
+        .unwrap();
+        let out = drain(&pty);
+        assert!(
+            out.contains("last") && !out.contains("first"),
+            "a duplicated key should resolve to the last entry: {out:?}"
+        );
+    }
+
+    #[test]
     fn cwd_is_applied_in_the_child() {
         let pty = spawn_with_env(
             &["sh".into(), "-c".into(), "pwd".into()],
