@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.18.1] — 2026-09-04
+
+### Added
+- `spawn --env-inherit` accepts validated trailing namespace wildcards such as
+  quoted `RITE_*`. Broad suffix, embedded, unanchored, and trivial wildcard
+  patterns fail instead of silently selecting unintended variables. Explicit
+  `--env` values still take precedence over inherited values.
+
+### Fixed
+- `spawn --cwd DIR` now retains the canonical absolute working directory in
+  agent metadata. `list --format json` reports `cwd` for both running and
+  retained exited agents. The optional protocol field defaults cleanly when an
+  older peer omits it, and records without `--cwd` continue to omit the field.
+
 ## [0.18.0] - 2026-07-31
 
 Breaking release. The `otel`, `runtime-tokio` and `runtime-asupersync` features
