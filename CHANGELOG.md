@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.18.2] — 2026-09-04
+
+This supersedes 0.18.1. Its release workflow stopped before crates.io
+publication and binary uploads.
+
+### Fixed
+- Restored clean checks under Rust 1.98 Clippy by making the private,
+  non-awaiting server auto-start helper synchronous. Runtime behavior is
+  unchanged.
+
 ## [0.18.1] — 2026-09-04
 
 ### Added

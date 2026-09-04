@@ -101,7 +101,7 @@ impl Client {
         }
 
         // Start the server
-        self.start_server().await?;
+        Self::start_server()?;
 
         // Try to connect with retries
         for i in 0..50 {
@@ -128,8 +128,7 @@ impl Client {
     /// Attempts to launch the server in its own systemd scope so it survives
     /// the death of the calling pane's cgroup. Falls back to a bare spawn if
     /// `systemd-run` is not available.
-    #[allow(clippy::unused_async)] // async for API consistency with other methods
-    async fn start_server(&self) -> Result<(), ClientError> {
+    fn start_server() -> Result<(), ClientError> {
         info!("Starting server...");
 
         let exe = std::env::current_exe().map_err(ClientError::ServerStart)?;
