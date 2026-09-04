@@ -23,6 +23,14 @@ struct TestEnv {
     server_process: Option<std::process::Child>,
 }
 
+struct TempDirCleanup(PathBuf);
+
+impl Drop for TempDirCleanup {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
 impl TestEnv {
     fn new() -> Self {
         let socket_path = unique_socket_path();
@@ -149,6 +157,83 @@ fn test_spawn_list_kill_workflow() {
         .assert()
         .success()
         .stdout(predicate::str::contains("exited"));
+}
+
+#[test]
+fn test_list_json_retains_resolved_cwd_after_exit() {
+    let mut env = TestEnv::new();
+    env.start_server();
+
+    let unique = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let requested_cwd =
+        std::env::temp_dir().join(format!("vessel cwd test {} {unique}", std::process::id()));
+    std::fs::create_dir(&requested_cwd).expect("create temporary cwd");
+    let _cleanup = TempDirCleanup(requested_cwd.clone());
+    let expected_cwd = std::fs::canonicalize(&requested_cwd).expect("canonicalize temporary cwd");
+    let requested_cwd = requested_cwd.to_str().expect("temporary cwd is UTF-8");
+
+    let output = env
+        .vessel()
+        .args([
+            "spawn",
+            "--name",
+            "cwd-metadata",
+            "--cwd",
+            requested_cwd,
+            "--",
+            "bash",
+        ])
+        .output()
+        .expect("spawn agent with cwd");
+    assert!(output.status.success(), "spawn should succeed");
+
+    let assert_cwd = |output: std::process::Output, expected_state: &str| {
+        assert!(output.status.success(), "list should succeed");
+        let json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("list should emit JSON");
+        let agent = json["agents"]
+            .as_array()
+            .expect("agents should be an array")
+            .iter()
+            .find(|agent| agent["id"] == "cwd-metadata")
+            .expect("cwd agent should be listed");
+        assert_eq!(agent["state"], expected_state);
+        assert_eq!(
+            agent["cwd"],
+            expected_cwd.to_str().expect("expected cwd is UTF-8")
+        );
+    };
+
+    let running = env
+        .vessel()
+        .args(["list", "--format", "json"])
+        .output()
+        .expect("list running agents");
+    assert_cwd(running, "running");
+
+    env.vessel()
+        .args([
+            "send",
+            "cwd-metadata",
+            "exit",
+            "--enter",
+            "--submit-delay-ms",
+            "0",
+        ])
+        .assert()
+        .success();
+    let _wait_output = env
+        .vessel()
+        .args(["wait", "cwd-metadata", "--exited"])
+        .output()
+        .expect("wait for cwd agent to exit");
+
+    let exited = env
+        .vessel()
+        .args(["list", "--all", "--format", "json"])
+        .output()
+        .expect("list exited agents");
+    assert_cwd(exited, "exited");
 }
 
 #[test]

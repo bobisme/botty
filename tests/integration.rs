@@ -106,6 +106,7 @@ vessel::async_test! {
                 assert_eq!(agents.len(), 1);
                 assert_eq!(agents[0].id, agent_id);
                 assert_eq!(agents[0].command, vec!["sleep", "10"]);
+                assert_eq!(agents[0].cwd, None);
             }
             other => panic!("expected Agents, got {:?}", other),
         }

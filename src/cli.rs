@@ -207,7 +207,7 @@ pub enum Command {
         #[arg(long, value_delimiter = ',')]
         env_inherit: Vec<String>,
 
-        /// Set working directory for the spawned process.
+        /// Set the process working directory. List JSON reports its canonical absolute path.
         #[arg(long)]
         cwd: Option<String>,
 

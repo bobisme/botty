@@ -757,6 +757,9 @@ async fn run_client(
                                     "size": { "rows": a.size.0, "cols": a.size.1 },
                                     "exit_code": a.exit_code,
                                 });
+                                if let Some(cwd) = &a.cwd {
+                                    obj["cwd"] = serde_json::json!(cwd);
+                                }
                                 if let Some(reason) = &a.exit_reason {
                                     obj["exit_reason"] = serde_json::json!(match reason {
                                         vessel::ExitReason::Normal => "normal",

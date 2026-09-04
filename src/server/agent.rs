@@ -25,6 +25,8 @@ pub struct Agent {
     pub id: String,
     /// The command that was spawned.
     pub command: Vec<String>,
+    /// Canonical absolute working directory requested for the process.
+    pub cwd: Option<String>,
     /// Labels for grouping agents.
     pub labels: Vec<String>,
     /// The PTY process.
@@ -79,6 +81,7 @@ impl Agent {
     pub fn new(
         id: String,
         command: Vec<String>,
+        cwd: Option<String>,
         labels: Vec<String>,
         limits: Option<ResourceLimits>,
         pty: PtyProcess,
@@ -95,6 +98,7 @@ impl Agent {
         Self {
             id,
             command,
+            cwd,
             labels,
             pty,
             state: AgentState::Running,

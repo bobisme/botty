@@ -229,6 +229,12 @@ Example:
 vessel list --format json | jq '.agents[] | {id, state, labels}'
 ```
 
+When `spawn --cwd DIR` is present, each list JSON record includes `cwd`. The
+server resolves `DIR` when it spawns the process. Relative paths use the server
+working directory. The reported value is the canonical absolute path, with
+symbolic links and `.` or `..` components resolved. Records omit `cwd` when the
+spawn request did not specify it.
+
 ## Server behavior
 
 - Server auto-starts for most regular commands.

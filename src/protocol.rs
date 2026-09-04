@@ -274,6 +274,10 @@ pub struct AgentInfo {
     pub state: AgentState,
     /// Command that was spawned.
     pub command: Vec<String>,
+    /// Canonical absolute working directory requested for the spawned process.
+    /// None when the spawn request did not specify a working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     /// Labels assigned to this agent.
     #[serde(default)]
     pub labels: Vec<String>,
@@ -785,6 +789,7 @@ mod tests {
                     pid: 12345,
                     state: AgentState::Running,
                     command: vec!["bash".into()],
+                    cwd: Some("/tmp/work tree".into()),
                     labels: vec!["worker".into()],
                     size: (24, 80),
                     started_at: 1706140800000,
@@ -845,6 +850,27 @@ mod tests {
             let json2 = serde_json::to_string(&parsed).expect("re-serialize");
             assert_eq!(json, json2, "roundtrip failed for {:?}", resp);
         }
+    }
+
+    #[test]
+    fn test_agent_info_without_cwd_is_backward_compatible() {
+        let json = r#"{
+            "id":"rusty-nail",
+            "pid":12345,
+            "state":"running",
+            "command":["bash"],
+            "labels":[],
+            "size":[24,80],
+            "started_at":1706140800000,
+            "exit_code":null,
+            "no_resize":false
+        }"#;
+
+        let info: AgentInfo = serde_json::from_str(json).expect("deserialize old AgentInfo");
+        assert_eq!(info.cwd, None);
+
+        let serialized = serde_json::to_value(info).expect("serialize AgentInfo");
+        assert!(serialized.get("cwd").is_none());
     }
 
     #[test]

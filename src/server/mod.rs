@@ -847,6 +847,28 @@ async fn handle_request(
                 return Response::error("command is empty");
             }
 
+            // Resolve the requested directory before spawning. The same
+            // canonical path is applied to the child and retained as metadata,
+            // so list output describes the effective launch directory.
+            let resolved_cwd = match cwd {
+                Some(requested) => match std::fs::canonicalize(&requested) {
+                    Ok(path) => match path.into_os_string().into_string() {
+                        Ok(path) => Some(path),
+                        Err(_) => {
+                            return Response::error(
+                                "spawn failed: resolved working directory is not valid UTF-8",
+                            );
+                        }
+                    },
+                    Err(error) => {
+                        return Response::error(format!(
+                            "spawn failed: cannot resolve working directory {requested:?}: {error}"
+                        ));
+                    }
+                },
+                None => None,
+            };
+
             // Parse environment variables
             let env_vars: Vec<(String, String)> = env
                 .iter()
@@ -958,12 +980,19 @@ async fn handle_request(
             };
 
             let spawn_env = pty::SpawnEnv { vars: env_vars };
-            match pty::spawn_with_env(&effective_cmd, rows, cols, &spawn_env, cwd.as_deref()) {
+            match pty::spawn_with_env(
+                &effective_cmd,
+                rows,
+                cols,
+                &spawn_env,
+                resolved_cwd.as_deref(),
+            ) {
                 Ok(pty_process) => {
                     let pid = pty_process.pid.as_raw() as u32;
                     let agent = Agent::new(
                         id.clone(),
                         cmd.clone(),
+                        resolved_cwd,
                         labels.clone(),
                         limits,
                         pty_process,
@@ -1016,6 +1045,7 @@ async fn handle_request(
                             InternalAgentState::Exited { .. } => AgentState::Exited,
                         },
                         command: agent.command.clone(),
+                        cwd: agent.cwd.clone(),
                         labels: agent.labels.clone(),
                         size: agent.screen.size(),
                         started_at,

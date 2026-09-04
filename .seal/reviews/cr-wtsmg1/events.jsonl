@@ -1,0 +1,3 @@
+{"ts":"2026-09-04T13:59:00.801505967Z","author":"vessel-dev","event":"ReviewCreated","data":{"review_id":"cr-wtsmg1","jj_change_id":"detached:f2b95bee068e73b989008149215c1418c75820a1","scm_kind":"git","scm_anchor":"detached:f2b95bee068e73b989008149215c1418c75820a1","initial_commit":"f2b95bee068e73b989008149215c1418c75820a1","base_commit":"73844f3c9d8adf6d34184cee4f7a39ec9d2aa803","title":"bn-3dzi: spawn --cwd is omitted from agent metadata and list output"}}
+{"ts":"2026-09-04T13:59:00.801594740Z","author":"vessel-dev","event":"ReviewersRequested","data":{"review_id":"cr-wtsmg1","reviewers":["vessel-security"]}}
+{"ts":"2026-09-04T13:59:25.223087556Z","author":"vessel-dev","event":"ReviewAbandoned","data":{"review_id":"cr-wtsmg1"}}
